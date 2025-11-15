@@ -10,8 +10,6 @@ This guide helps you set up the Reddit to Kindle newsletter generator on Windows
    - The setup wizard will configure email, Reddit settings, and **automatically set up daily scheduling**
 4. **Generate newsletter**: `npm start`
 
-> **✨ New!** The setup wizard can now automatically configure daily scheduling for you on both Windows and Linux/macOS!
-
 ## Platform-Specific Instructions
 
 ### Windows Setup
