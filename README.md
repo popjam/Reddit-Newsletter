@@ -30,12 +30,15 @@ That's it! Your personalized Reddit newsletter will be automatically sent to you
 
 Reddit-Newsletter is a program that converts Reddit content into a formatted EPUB with a table of contents. You can specify any subreddits you want to be included in the newsletter, the time range to fetch posts from, the sorting method, how comments are displayed, and more. It will attempt to include the text from articles and self posts so you don't need to use any inbuilt browsers.
 
-<img height="400" alt="image" src="https://github.com/user-attachments/assets/9b32ec1b-9db3-4572-a335-2c485776408b" />
-<img height="200" alt="image" src="https://github.com/user-attachments/assets/5cf5fd4e-fd46-4433-a959-05bc3257483c" />
-<img height="200" alt="image" src="https://github.com/user-attachments/assets/f5421890-ee07-4005-a7fd-9abccc782fe0" />
-<img height="200" alt="image" src="https://github.com/user-attachments/assets/b554c6a1-a9e7-4bd2-b03e-620d0b3f0071" />
-<img height="200" alt="image" src="https://github.com/user-attachments/assets/ed76da90-65f9-4f4d-b8c5-1d7c7bf3b9d2" />
-<img height="200" alt="image" src="https://github.com/user-attachments/assets/8952be44-1221-4be6-bc9a-4248331d4b6a" />
+| Cover | Subreddit Contents | Subreddit Title Page |
+|-----------|---------|---------|
+| <img src="https://github.com/user-attachments/assets/9b32ec1b-9db3-4572-a335-2c485776408b" height="300"> | <img src="https://github.com/user-attachments/assets/5cf5fd4e-fd46-4433-a959-05bc3257483c" height="300"> | <img src="https://github.com/user-attachments/assets/f5421890-ee07-4005-a7fd-9abccc782fe0" height="300"> |
+
+| Post Contents | Post View | Article View |
+|---------|---------|---------|
+| <img src="https://github.com/user-attachments/assets/b554c6a1-a9e7-4bd2-b03e-620d0b3f0071" height="300"> | <img src="https://github.com/user-attachments/assets/ed76da90-65f9-4f4d-b8c5-1d7c7bf3b9d2" height="300"> | <img src="https://github.com/user-attachments/assets/8952be44-1221-4be6-bc9a-4248331d4b6a" height="300"> |
+
+
 
 
 
