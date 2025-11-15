@@ -1,10 +1,16 @@
-// --- START OF FILE send_epub_to_kindle.js (REVISED) ---
+/**
+ * Send Only Script
+ * 
+ * This script only sends the most recent EPUB file to Kindle
+ * without regenerating it. Useful for testing email functionality.
+ */
 
 import nodemailer from 'nodemailer';
-import fs from 'fs';
+import fs from 'fs/promises';
+import fsSync from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
-import { defaultConfig } from './config.js'; // Import the base default config
+import { defaultConfig } from './config.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -13,9 +19,9 @@ function loadConfig() {
     let finalConfig = JSON.parse(JSON.stringify(defaultConfig)); // Deep copy defaults
     const userConfigPath = path.join(__dirname, 'user-config.json');
 
-    if (fs.existsSync(userConfigPath)) {
+    if (fsSync.existsSync(userConfigPath)) {
         try {
-            const userConfig = JSON.parse(fs.readFileSync(userConfigPath, 'utf8'));
+            const userConfig = JSON.parse(fsSync.readFileSync(userConfigPath, 'utf8'));
             // Deep merge user config onto the defaults
             const deepMerge = (target, source) => {
                 for (const key in source) {
@@ -41,8 +47,13 @@ function loadConfig() {
 }
 
 const config = loadConfig();
-// --- END OF UNIFIED CONFIGURATION LOADER ---
+if (!config) {
+    process.exit(1);
+}
 
+// Get email configuration
+const { email: emailConfig } = config;
+const { gmail, gmx, kindle } = emailConfig;
 
 // Function to get email provider configuration
 function getEmailProviderConfig(emailConfig) {
@@ -54,6 +65,9 @@ function getEmailProviderConfig(emailConfig) {
                     host: 'smtp.gmail.com',
                     port: 465,
                     secure: true,
+                    connectionTimeout: 900000, // 15 minutes
+                    greetingTimeout: 900000,   // 15 minutes
+                    socketTimeout: 900000,     // 15 minutes
                     auth: {
                         user: gmail.email,
                         pass: gmail.appPassword,
@@ -90,105 +104,73 @@ function getEmailProviderConfig(emailConfig) {
 
 // Function to find the most recent EPUB file
 function getMostRecentEpubFile() {
-    const files = fs.readdirSync(__dirname);
+    const files = fsSync.readdirSync(__dirname);
     const epubFiles = files
         .filter(file => file.startsWith('reddit_') && file.endsWith('.epub'))
         .map(file => ({
             name: file,
             path: path.join(__dirname, file),
-            mtime: fs.statSync(path.join(__dirname, file)).mtime
+            mtime: fsSync.statSync(path.join(__dirname, file)).mtime
         }))
         .sort((a, b) => b.mtime - a.mtime);
-
+    
     if (epubFiles.length > 0) {
         return {
             filename: epubFiles[0].name,
             path: epubFiles[0].path
         };
     }
-    return null; // Return null if no EPUB found
+    throw new Error('No EPUB files found. Please run the generator first.');
 }
 
 
-// --- Main logic to send the email ---
+// Main logic to send the email
 async function sendEpub() {
-    // Check if config was loaded successfully
-    if (!config) {
-        return; // Exit if user-config.json is missing
-    }
-
-    const { email: emailConfig } = config;
-
     try {
         const epubInfo = getMostRecentEpubFile();
-        if (!epubInfo) {
-            console.log('ℹ️  No EPUB file found to send. Skipping email step.');
-            return;
-        }
-
-        console.log(`\n--- Sending EPUB to Kindle ---`);
-        console.log(`Reading EPUB file: ${epubInfo.filename}...`);
-
-        const data = fs.readFileSync(epubInfo.path);
-
-        const emailProviderConfig = getEmailProviderConfig(emailConfig);
-        // Create transporter inside retry function to ensure fresh connections
-
-        console.log(`Sending email to ${emailConfig.kindle.email} via ${emailConfig.provider.toUpperCase()}...`);
-        console.log(`File size: ${(data.length / 1024 / 1024).toFixed(1)}MB`);
-        console.log('This may take several minutes for large files...');
-
-        // Retry function with exponential backoff
-        const retryWithBackoff = async (fn, maxRetries = 3, baseDelay = 5000) => {
-            for (let attempt = 1; attempt <= maxRetries; attempt++) {
-                try {
-                    return await fn();
-                } catch (error) {
-                    if (attempt === maxRetries) {
-                        throw error;
-                    }
-                    
-                    const delay = baseDelay * Math.pow(2, attempt - 1);
-                    console.log(`⚠️  Attempt ${attempt} failed: ${error.message}`);
-                    console.log(`🔄 Retrying in ${delay / 1000} seconds... (${attempt}/${maxRetries})`);
-                    
-                    await new Promise(resolve => setTimeout(resolve, delay));
-                }
-            }
+        console.log(`📖 Found EPUB: ${epubInfo.filename}`);
+        
+        const data = await fs.readFile(epubInfo.path);
+        const fileSizeMB = (data.length / 1024 / 1024).toFixed(1);
+        
+        console.log(`📊 File size: ${fileSizeMB}MB`);
+        console.log(`📧 Sending to: ${kindle.email}`);
+        console.log(`⏳ This may take several minutes for large files...`);
+        
+        // Get email provider configuration
+        const providerConfig = getEmailProviderConfig(emailConfig);
+        const transporter = nodemailer.createTransport(providerConfig.transport);
+        
+        const startTime = Date.now();
+        
+        const mailOptions = {
+            from: providerConfig.from,
+            to: kindle.email,
+            subject: kindle.subject,
+            text: kindle.message,
+            attachments: [
+                {
+                    filename: epubInfo.filename,
+                    content: data,
+                    contentType: 'application/epub+zip',
+                },
+            ],
         };
 
-        const sendMailWithRetry = async () => {
-            const transporter = nodemailer.createTransport(emailProviderConfig.transport);
-            
-            const mailOptions = {
-                from: emailProviderConfig.from,
-                to: emailConfig.kindle.email,
-                subject: emailConfig.kindle.subject,
-                text: emailConfig.kindle.message,
-                attachments: [
-                    {
-                        filename: epubInfo.filename,
-                        content: data,
-                        contentType: 'application/epub+zip',
-                    },
-                ],
-            };
-
-            return await transporter.sendMail(mailOptions);
-        };
-
-        const info = await retryWithBackoff(sendMailWithRetry, 3, 5000);
-        console.log('✅ Email sent successfully!', info.response);
-        console.log('Your EPUB should appear on your Kindle shortly.');
+        const info = await transporter.sendMail(mailOptions);
+        const duration = Math.round((Date.now() - startTime) / 1000);
+        
+        console.log(`✅ Email sent successfully in ${duration} seconds!`);
+        console.log(`📱 Response: ${info.response}`);
+        console.log(`📚 Your EPUB should appear on your Kindle shortly.`);
 
     } catch (err) {
-        console.error('❌ Failed to send email after all retry attempts:', err);
-        console.log('\n💡 Troubleshooting tips:');
-        console.log('   • Check your internet connection');
-        console.log('   • Verify your GMX email credentials');  
-        console.log('   • Try again in a few minutes (GMX may be temporarily blocking)');
+        console.error('❌ An error occurred:', err.message);
+        process.exit(1);
     }
 }
 
 // Run the function
+console.log('🚀 Reddit to Kindle - Email Only Mode');
+console.log('=====================================\n');
 sendEpub();
