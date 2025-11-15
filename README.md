@@ -154,23 +154,27 @@ crontab -e
 
 ## Configuration Options
 
-### Global Settings
-- **Image downloads:** Enable/disable image embedding
-- **Image optimization:** Automatic resizing and compression
-- **Rate limiting:** Configurable delays for Reddit API
-- **Error handling:** Retry logic and timeout settings
+Configurations can be made in user-config.json. Subreddit configurations can be global or subreddit specific.
 
-### Per-Subreddit Settings
-- **Post count:** Override global post limit
-- **Comment count:** Override global comment limit  
-- **Sorting:** hot, new, top, controversial, best, rising
-- **Time period:** hour, day, week, month, year, all
-- **Content filtering:** Include/exclude video posts, internal links
+### Subreddit Settings
+- **commentsPerPost:** Amount of top level comments for each post.
+- **sort:** hot, new, top, controversial, best, rising
+- **timeframe:** hour, day, week, month, year, all
+- **includeInternalLinks:** Include/exclude self posts
+- **skipUnfetchableArticles:** If the articles text cannot be fetched, skip the post.
+- **commentStyle:** threaded or nested. Nested will include all child comments up to the specified depth. Threaded will only include the top "chain" of comments up to the specified depth, better simulating a conversation.
+- **minCommentLength:** Will skip comments under this amount of characters. In threaded, only applies to top level comments.
+
+### General Settings
+- **imageOptimizationPreset:** default, aggressive, extreme
 
 ### EPUB Settings
-- **Simplified TOC:** Show only subreddit sections (default: true)
-- **Custom title:** Personalize your newsletter title
-- **Language settings:** Support for international content
+- **simplifiedTOC:** Show only subreddit sections (default: true)
+- **hierarchicalTOC:** Show only subreddit sections (default: true)
+- **title:** Personalize your newsletter title
+
+### Other Settings
+Rate limiting and timeout, image size, and cover generation settings can be modified in config.js.
 
 ## License
 
