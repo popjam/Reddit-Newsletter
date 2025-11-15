@@ -1,6 +1,6 @@
 # Reddit Newsletter
 
-**Transform Reddit into a personalized daily or weekly newsletter, delivered to your Kindle!**
+**Transform Reddit into a personalized daily or weekly newsletter, delivered to your Kindle! Modified from jstriblet's [Reddit-to-Kindle](https://github.com/jstriblet/Reddit-to-Kindle) program to add article integration and other features.**
 
 ## Quick Start
 
