@@ -1,13 +1,13 @@
-# Reddit-to-Kindle Newsletter Generator
+# Reddit Newsletter Generator
 
-**Transform Reddit into your personalized daily newsletter, delivered straight to your Kindle!**
+**Transform Reddit into your personalized daily or weekly newsletter, delivered to your Kindle or Ereader device.**
 
 ## 🚀 Quick Start
 
 1. **Clone and install:**
    ```bash
-   git clone https://github.com/jstriblet/reddit-to-kindle.git
-   cd reddit-to-kindle
+   git clone https://github.com/popjam/Reddit-Newsletter.git
+   cd Reddit-Weekly-Newsletter
    npm install
    ```
 
@@ -15,7 +15,7 @@
    ```bash
    npm run setup
    ```
-   *The setup wizard will configure email, Reddit settings, and can automatically set up daily scheduling for you!*
+   *The setup wizard will configure email, Reddit settings, and can automatically set up daily scheduling for you.*
 
 3. **Generate your first newsletter:**
    ```bash
@@ -28,7 +28,7 @@ That's it! Your personalized Reddit newsletter will be automatically sent to you
 
 ## 📖 Description
 
-Reddit-to-Kindle is a powerful Node.js application that converts Reddit content into beautifully formatted EPUB files, perfect for reading on your Kindle or any eBook reader. It fetches posts from your favorite subreddits, includes top comments, and organizes everything into a clean, readable newsletter format.
+Reddit-Newsletter is a program that converts Reddit content into a formatted EPUB with a table of contents. You can specify any subreddits you want to be included in the newsletter, the time range to fetch posts from, the sorting method, how comments are displayed, and more. It will attempt to include the text from articles and self posts so you don't need to use any inbuilt browsers.
 
 ![Newsletter Examples](https://github.com/jstriblet/Reddit-to-Kindle/assets/12757245/6c589315-64e3-47a6-947e-38346784e5db)
 
