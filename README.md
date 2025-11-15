@@ -7,7 +7,7 @@
 1. **Clone and install:**
    ```bash
    git clone https://github.com/popjam/Reddit-Newsletter.git
-   cd Reddit-Weekly-Newsletter
+   cd Reddit-Newsletter
    npm install
    ```
 
@@ -52,8 +52,8 @@ Reddit-Newsletter is a program that converts Reddit content into a formatted EPU
 
 1. **Clone the repository:**
    ```bash
-   git clone https://github.com/jstriblet/reddit-to-kindle.git
-   cd reddit-to-kindle
+   git clone https://github.com/jstriblet/Reddit-Newsletter.git
+   cd Reddit-Newsletter
    ```
 
 2. **Install dependencies:**
