@@ -32,7 +32,7 @@ Reddit-Newsletter is a program that converts Reddit content into a formatted EPU
 
 ![Newsletter Examples](https://github.com/jstriblet/Reddit-to-Kindle/assets/12757245/6c589315-64e3-47a6-947e-38346784e5db)
 
-## 🛠️ Installation & Setup
+## Installation & Setup
 
 ### Prerequisites
 - Node.js 18+ 
