@@ -1,6 +1,6 @@
-# Reddit Newsletter Generator
+# Reddit Newsletter
 
-**Transform Reddit into your personalized daily or weekly newsletter, delivered to your Kindle or Ereader device.**
+**Transform Reddit into a personalized daily or weekly newsletter, delivered to your Kindle or Ereader device!**
 
 ## Quick Start
 
