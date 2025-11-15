@@ -28,7 +28,7 @@ That's it! Your Reddit newsletter will be generated and sent to your Kindle.
 
 ## Description
 
-Reddit-Newsletter is a program that converts Reddit content into a formatted EPUB with a table of contents. You can specify any subreddits you want to be included in the newsletter, the time range to fetch posts from, the sorting method, how comments are displayed, and more. It will attempt to include the text from articles and self posts so you don't need to use any inbuilt browsers.
+Reddit-Newsletter is a program that converts Reddit content into a formatted EPUB organized by subreddits. You can specify any subreddits you want to be included in the newsletter, the time range to fetch posts from, the sorting method, how comments are displayed, and more. It will attempt to fetch the articles and self posts so you don't need to use the inbuilt browser.
 
 | Cover | Main Contents | Subreddit Title Page |
 |-----------|---------|---------|
