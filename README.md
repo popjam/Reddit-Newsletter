@@ -15,14 +15,14 @@
    ```bash
    npm run setup
    ```
-   *The setup wizard will configure email, Reddit settings, and can automatically set up daily scheduling for you.*
+   *The setup wizard will configure email, Reddit settings, and daily scheduling.*
 
 3. **Generate your first newsletter:**
    ```bash
    npm start
    ```
 
-That's it! Your personalized Reddit newsletter will be automatically sent to your Kindle.
+That's it! Your Reddit newsletter will be generated and sent to your Kindle.
 
 > See [SETUP.md](SETUP.md) for detailed Windows, Linux, and macOS instructions.
 
@@ -120,9 +120,6 @@ npm start
 # Reconfigure settings
 npm run setup
 
-# Advanced setup with all options
-npm run setup:advanced
-
 # Show help
 npm run help
 ```
@@ -160,7 +157,7 @@ crontab -e
 1. Open Task Scheduler
 2. Create Basic Task
 3. Set trigger (daily, weekly, etc.)
-4. Set action to run: `cmd /c "cd C:\path\to\reddit-newsletter && npm start"`
+4. Set action to "Start a program" and in the "Program/script" box, browse to and select the `run-newsletter.bat` file located in your project folder.
 
 ## Configuration Options
 

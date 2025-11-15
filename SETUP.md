@@ -172,13 +172,8 @@ crontab -e
 | Command | Description |
 |---------|-------------|
 | `npm start` | Generate newsletter |
-| `npm run start:cover` | Generate with updated cover (cross-platform) |
-| `npm run start:cover:windows` | Windows cover generation |
-| `npm run start:cover:linux` | Linux/macOS cover generation |
 | `npm run setup` | Run setup wizard |
-| `npm run setup:advanced` | Advanced setup options |
 | `npm run reconfigure` | Reconfigure existing settings |
-| `npm run check-process` | Check if newsletter is running |
 | `npm run platform-info` | Show platform information |
 | `npm run help` | Show help information |
 

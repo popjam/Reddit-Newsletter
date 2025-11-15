@@ -31,7 +31,7 @@ function getPlatformInfo() {
     const isWindows = process.platform === 'win32';
     const isLinux = process.platform === 'linux';
     const isMacOS = process.platform === 'darwin';
-    
+
     return {
         platform: process.platform,
         isWindows,
@@ -49,7 +49,7 @@ async function checkDependencies() {
         npm: false,
         imagemagick: false
     };
-    
+
     // Check Node.js
     try {
         await execAsync('node --version');
@@ -57,7 +57,7 @@ async function checkDependencies() {
     } catch (e) {
         checks.node = false;
     }
-    
+
     // Check npm
     try {
         await execAsync('npm --version');
@@ -65,7 +65,7 @@ async function checkDependencies() {
     } catch (e) {
         checks.npm = false;
     }
-    
+
     // Check ImageMagick
     try {
         const command = platform.isWindows ? 'magick -version' : 'convert -version';
@@ -74,27 +74,27 @@ async function checkDependencies() {
     } catch (e) {
         checks.imagemagick = false;
     }
-    
+
     return checks;
 }
 
 async function displayPlatformInfo() {
     const platform = getPlatformInfo();
     const deps = await checkDependencies();
-    
+
     info(`Platform: ${platform.platform} (${platform.arch})`);
     info(`Node.js: ${platform.nodeVersion}`);
-    
+
     console.log('\nDependency Check:');
     success(`Node.js: ${deps.node ? '✅ Installed' : '❌ Missing'}`);
     success(`npm: ${deps.npm ? '✅ Installed' : '❌ Missing'}`);
     success(`ImageMagick: ${deps.imagemagick ? '✅ Installed' : '❌ Missing (optional for cover generation)'}`);
-    
+
     if (!deps.node || !deps.npm) {
         error('Missing required dependencies. Please install Node.js from https://nodejs.org/');
         return false;
     }
-    
+
     if (!deps.imagemagick) {
         warning('ImageMagick not found - cover generation will be disabled');
         if (platform.isWindows) {
@@ -103,21 +103,21 @@ async function displayPlatformInfo() {
             info('Install ImageMagick: sudo apt install imagemagick (Ubuntu) or brew install imagemagick (macOS)');
         }
     }
-    
+
     return true;
 }
 
 async function setupScheduler() {
     const platform = getPlatformInfo();
-    
+
     section('Automatic Scheduling Setup (Optional)');
     info('Set up automatic newsletter generation to run on schedule');
-    
+
     const setupSchedule = await question('Would you like to set up automatic scheduling? (y/n): ');
     if (setupSchedule.toLowerCase() !== 'y') {
         return;
     }
-    
+
     return await configureSchedule(platform);
 }
 
@@ -125,30 +125,30 @@ async function configureSchedule(platform) {
     // Get frequency
     const frequency = await question('How often should it run? (1=daily, 2=weekly): ');
     const isWeekly = frequency === '2';
-    
+
     let weekday = null;
     if (isWeekly) {
         console.log('\nWeekdays: 1=Monday, 2=Tuesday, 3=Wednesday, 4=Thursday, 5=Friday, 6=Saturday, 7=Sunday');
         const weekdayInput = await question('Which day of the week? (1-7): ');
         weekday = parseInt(weekdayInput) || 1;
     }
-    
+
     // Get time in 24-hour format
     const timeInput = await question('What time should it run? (24-hour format, e.g., "07:00" or "19:30"): ');
     const time = timeInput.trim() || '07:00';
-    
+
     // Validate time format
     const timeRegex = /^([0-1]?\d|2[0-3]):([0-5]\d)$/;
     if (!timeRegex.test(time)) {
         warning('Invalid time format. Using default 07:00');
         time = '07:00';
     }
-    
+
     const scheduleType = isWeekly ? 'weekly' : 'daily';
     const scheduleDesc = isWeekly ? `weekly on ${['', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday', 'Sunday'][weekday]}` : 'daily';
-    
+
     info(`Setting up ${scheduleDesc} at ${formatTime12Hour(time)}`);
-    
+
     try {
         if (platform.isWindows) {
             await setupWindowsScheduler(time, isWeekly, weekday);
@@ -171,15 +171,15 @@ function formatTime12Hour(time24) {
 
 async function setupWindowsScheduler(time, isWeekly = false, weekday = null) {
     info('Setting up Windows Task Scheduler...');
-    
+
     const taskName = 'Reddit Newsletter Generator';
     const scriptPath = path.join(__dirname, 'run-newsletter.bat');
     const scheduleType = isWeekly ? 'weekly' : 'daily';
     const description = `${isWeekly ? 'Weekly' : 'Daily'} generation of Reddit newsletter`;
-    
+
     // Write PowerShell script to temporary file
     const psScriptPath = path.join(__dirname, 'temp-scheduler-setup.ps1');
-    
+
     let triggerScript;
     if (isWeekly) {
         // Convert weekday number to PowerShell DaysOfWeek enum
@@ -189,7 +189,7 @@ async function setupWindowsScheduler(time, isWeekly = false, weekday = null) {
     } else {
         triggerScript = `$Trigger = New-ScheduledTaskTrigger -Daily -At $Time`;
     }
-    
+
     const psScript = `$TaskName = "${taskName}"
 $TaskDescription = "${description}"  
 $ScriptPath = "${scriptPath.replace(/\\/g, '\\\\')}"
@@ -224,21 +224,21 @@ try {
     Write-Host "ERROR: $($_.Exception.Message)"
     exit 1
 }`;
-    
+
     try {
         // Write PowerShell script to file
         fs.writeFileSync(psScriptPath, psScript);
-        
+
         // Execute PowerShell script
         const { stdout, stderr } = await execAsync(`powershell -ExecutionPolicy Bypass -File "${psScriptPath}"`);
-        
+
         // Clean up temporary script file
         try {
             fs.unlinkSync(psScriptPath);
         } catch (e) {
             // Ignore cleanup errors
         }
-        
+
         if (stdout.includes('SUCCESS')) {
             success(`✅ Windows Task Scheduler configured successfully!`);
             const scheduleDesc = isWeekly ? `weekly on ${['', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday', 'Sunday'][weekday]}` : 'daily';
@@ -260,11 +260,11 @@ try {
 
 async function setupLinuxScheduler(time, isWeekly = false, weekday = null) {
     info('Setting up cron job for automatic scheduling...');
-    
+
     // Convert time to cron format
     const [hours, minutes = '0'] = time.split(':');
     let cronTime;
-    
+
     if (isWeekly) {
         // Cron uses 0=Sunday, 1=Monday, etc. Our input uses 1=Monday, 7=Sunday
         const cronWeekday = weekday === 7 ? 0 : weekday;
@@ -272,9 +272,9 @@ async function setupLinuxScheduler(time, isWeekly = false, weekday = null) {
     } else {
         cronTime = `${minutes} ${hours} * * *`;
     }
-    
+
     const cronJob = `${cronTime} cd "${__dirname}" && bash run-newsletter.sh`;
-    
+
     try {
         // Get existing crontab
         let existingCrontab = '';
@@ -284,26 +284,26 @@ async function setupLinuxScheduler(time, isWeekly = false, weekday = null) {
         } catch (e) {
             // No existing crontab is fine
         }
-        
+
         // Remove any existing reddit newsletter cron jobs
         const filteredCrontab = existingCrontab
             .split('\n')
             .filter(line => !line.includes('run-newsletter.sh'))
             .filter(line => line.trim() !== '')
             .join('\n');
-        
+
         // Add new cron job
         const newCrontab = filteredCrontab + (filteredCrontab ? '\n' : '') + cronJob + '\n';
-        
+
         // Install new crontab
         await execAsync(`echo "${newCrontab}" | crontab -`);
-        
+
         success(`✅ Cron job configured successfully!`);
         const scheduleDesc = isWeekly ? `weekly on ${['', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday', 'Sunday'][weekday]}` : 'daily';
         info(`📅 Newsletter will run ${scheduleDesc} at ${formatTime12Hour(time)}`);
         info(`🔍 You can view cron jobs with: crontab -l`);
         info(`❌ To remove: crontab -e (then delete the reddit-newsletter line)`);
-        
+
     } catch (err) {
         throw new Error(`Cron setup failed: ${err.message}`);
     }
@@ -379,7 +379,7 @@ async function setupNewsletter(config) {
     const displaySubreddits = config.reddit.subreddits
         .map(sub => typeof sub === 'string' ? sub : sub.toString())
         .filter(sub => sub && sub !== '[object Object]');
-    
+
     const subredditsInput = await question(`Enter subreddits, comma-separated [${displaySubreddits.join(', ')}]: `) || displaySubreddits.join(', ');
     config.reddit.subreddits = subredditsInput.split(',').map(s => s.trim()).filter(Boolean);
 
@@ -404,17 +404,17 @@ async function setupNewsletter(config) {
 async function setupCoverGeneration(config) {
     section('Cover Generation');
     info('The newsletter can automatically generate a book cover with the current date');
-    
+
     const generateCover = await question(`Enable automatic cover generation? (y/n) [${config.epub.generateDatedCover ? 'y' : 'n'}]: `) || (config.epub.generateDatedCover ? 'y' : 'n');
     config.epub.generateDatedCover = generateCover.toLowerCase() === 'y';
-    
+
     if (config.epub.generateDatedCover) {
         info('✅ Cover will be automatically generated with current date');
         info('📝 Requires ImageMagick to be installed');
     } else {
         info('📖 Using static cover image');
     }
-    
+
     success('Cover generation configured!');
 }
 
@@ -465,14 +465,14 @@ async function saveConfiguration(config) {
 
 async function runSetup() {
     header('Reddit to Kindle Setup Wizard');
-    
+
     // Display platform info and check dependencies first
     const depsOk = await displayPlatformInfo();
     if (!depsOk) {
         rl.close();
         return;
     }
-    
+
     const config = loadInitialConfig();
 
     await setupEmail(config);
@@ -486,22 +486,19 @@ async function runSetup() {
     if (confirm.toLowerCase() === 'y') {
         await saveConfiguration(config);
         header('Setup Complete!');
-        
+
         const platform = getPlatformInfo();
         log('Your Reddit to Kindle newsletter is now configured!', 'green');
-        console.log('\nAvailable commands:');
-        console.log('• npm start                    - Generate newsletter');
-        console.log('• npm run start:cover          - Generate with updated cover');
-        if (platform.isWindows) {
-            console.log('• run-newsletter.bat           - Windows launcher script');
-            console.log('• start-with-cover.bat         - Windows cover generation');
-        } else {
-            console.log('• bash run-newsletter.sh       - Linux/macOS launcher script');
-            console.log('• bash start-with-cover.sh     - Linux/macOS cover generation');
-        }
-        console.log('• npm run check-process        - Check if newsletter is running');
-        console.log('• npm run platform-info        - Show platform information');
-        
+        console.log('\nNext Steps:');
+        console.log('  1. To generate your first newsletter, run:');
+        console.log(colorize('     npm start', 'cyan'));
+
+        console.log('\n  2. To check the status of your automated schedule, run:');
+        console.log(colorize('     npm run check-schedule', 'cyan'));
+
+        console.log('\n  3. To change your settings again at any time, run:');
+        console.log(colorize('     npm run setup', 'cyan'));
+
     } else {
         warning('Configuration not saved.');
     }
