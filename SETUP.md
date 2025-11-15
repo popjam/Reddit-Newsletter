@@ -24,7 +24,7 @@ This guide helps you set up the Reddit to Kindle newsletter generator on Windows
 1. Open **Command Prompt** or **PowerShell** as Administrator
 2. Navigate to the project folder:
    ```cmd
-   cd C:\path\to\reddit-to-kindle
+   cd C:\path\to\reddit-newsletter
    ```
 3. Install dependencies:
    ```cmd
@@ -76,7 +76,7 @@ sudo apt install imagemagick
 #### Installation Steps
 ```bash
 # Navigate to project folder
-cd /path/to/reddit-to-kindle
+cd /path/to/reddit-newsletter
 
 # Install dependencies
 npm install
@@ -108,7 +108,7 @@ bash run-newsletter.sh
 crontab -e
 
 # Add this line for daily execution at 7:00 AM
-0 7 * * * cd /path/to/reddit-to-kindle && bash run-newsletter.sh
+0 7 * * * cd /path/to/reddit-newsletter && bash run-newsletter.sh
 
 # Check existing cron jobs
 crontab -l
@@ -133,7 +133,7 @@ brew install imagemagick
 #### Installation Steps
 ```bash
 # Navigate to project folder
-cd /path/to/reddit-to-kindle
+cd /path/to/reddit-newsletter
 
 # Install dependencies
 npm install
@@ -166,7 +166,7 @@ Same as Linux - use crontab:
 crontab -e
 
 # Add this line for daily execution at 7:00 AM
-0 7 * * * cd /path/to/reddit-to-kindle && bash run-newsletter.sh
+0 7 * * * cd /path/to/reddit-newsletter && bash run-newsletter.sh
 ```
 
 ## Available Commands
@@ -222,7 +222,7 @@ chmod +x start-with-cover.sh
 3. Name: "Reddit Newsletter Generator"
 4. Trigger: Daily at desired time
 5. Action: "Start a program"
-6. Program: `C:\path\to\reddit-to-kindle\run-newsletter.bat`
+6. Program: `C:\path\to\reddit-newsletter\run-newsletter.bat`
 7. Arguments: `auto`
 
 **Cron job not running (Linux/macOS):**
