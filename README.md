@@ -74,8 +74,7 @@ The setup wizard will guide you through:
 - **Kindle email:** Instructions on finding your Kindle email and adding your sender to the approved list
 
 #### Reddit OAuth (Recommended)
-- **Why use OAuth:** Higher rate limits (60 requests/minute vs 10), better reliability and speeds
-- **Setup instructions:** Step-by-step guide to create a Reddit app
+- **Why use OAuth:** Higher rate limits (60 requests/minute vs 10) and speeds (Setup [here](https://www.reddit.com/prefs/apps)).
 - **Optional:** You can skip this for basic usage
 
 #### Newsletter Preferences
