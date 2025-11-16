@@ -69,21 +69,20 @@ Reddit-Newsletter is a program that converts Reddit content into a formatted EPU
 The setup wizard will guide you through:
 
 #### Email Configuration
-- **Gmail setup:** The wizard will explain how to create App Passwords for secure authentication
-- **GMX setup:** Simple username/password configuration  
+- **Gmail setup:** Create an app password (tutorial [here](https://support.google.com/mail/answer/185833?hl=en)).
+- **GMX setup:** Simple username/password configuration (create gmx account [here](https://www.gmx.com)). 
 - **Kindle email:** Instructions on finding your Kindle email and adding your sender to the approved list
 
 #### Reddit OAuth (Recommended)
-- **Why use OAuth:** Higher rate limits (60 requests/minute vs 10), better reliability
+- **Why use OAuth:** Higher rate limits (60 requests/minute vs 10), better reliability and speeds
 - **Setup instructions:** Step-by-step guide to create a Reddit app
 - **Optional:** You can skip this for basic usage
 
 #### Newsletter Preferences
 - **Subreddit selection:** Enter your favorite subreddits (e.g., `worldnews, technology, AskReddit`)
-- **Posts per subreddit:** How many posts to include (1-10)
-- **Comments per post:** How many top comments to include (0-10)
+- **Posts per subreddit:** How many posts to include 
+- **Comments per post:** How many top comments to include 
 - **Time period:** Daily, weekly, monthly, or yearly top posts
-- **Image downloads:** Whether to include images in your newsletter
 
 ### Manual Configuration (Advanced)
 
