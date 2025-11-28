@@ -1,83 +1,38 @@
 @echo off
-REM Cross-platform Reddit Newsletter Launcher for Windows
-REM This script detects the environment and runs the appropriate version
-
-setlocal enabledelayedexpansion
-
-REM Change to script directory
 cd /d "%~dp0"
 
-REM Display output directly on screen
-echo ===============================================
-echo Reddit Newsletter Generator - Windows
-echo Started: %date% %time%
-echo Platform: Windows %PROCESSOR_ARCHITECTURE%
-echo ===============================================
+REM --- Setup Logging Environment ---
+REM We set this variable so index.js knows where to write the verbose logs
+set "LOG_FILE=%~dp0newsletter-log.txt"
 
-REM Check for Node.js
-node --version >nul 2>&1
+REM --- Log Start to File Manually (for batch tracking) ---
+echo. >> "%LOG_FILE%"
+echo =============================================== >> "%LOG_FILE%"
+echo Batch Run Started: %date% %time% >> "%LOG_FILE%"
+
+REM --- Check for Node.js ---
+where node >nul 2>&1
 if %ERRORLEVEL% NEQ 0 (
-    echo ❌ ERROR: Node.js not found in PATH
-    echo Please install Node.js from https://nodejs.org/
-    goto :error
+    echo Error: Node.js not found in PATH
+    echo Error: Node.js not found >> "%LOG_FILE%"
+    pause
+    exit /b 1
 )
 
-REM Check for npm
-npm --version >nul 2>&1
-if %ERRORLEVEL% NEQ 0 (
-    echo ❌ ERROR: npm not found in PATH
-    echo Please ensure npm is properly installed with Node.js
-    goto :error
-)
-
-REM Verify we're in the right directory
-if not exist package.json (
-    echo ❌ ERROR: package.json not found
-    echo Current directory: %CD%
-    echo Please run this script from the project root directory
-    goto :error
-)
-
-echo ✅ All prerequisites checked
-echo 🚀 Starting newsletter generation...
-echo.
-
-REM Run the newsletter generator
-npm start
+REM --- Run the Newsletter ---
+REM No arguments needed. The script will find LOG_FILE automatically.
+call npm start
 
 if %ERRORLEVEL% EQU 0 (
     echo.
-    echo ✅ Newsletter generation completed successfully!
-    echo Check your email for the generated newsletter
+    echo Success!
+    echo Batch Run Completed: %date% %time% >> "%LOG_FILE%"
 ) else (
     echo.
-    echo ❌ Newsletter generation failed with error code: %ERRORLEVEL%
-    echo Check the output above for details
-    goto :error
+    echo Failed!
+    echo Batch Run Failed: %date% %time% >> "%LOG_FILE%"
 )
 
-echo.
-echo Completed: %date% %time%
-echo ===============================================
-
-REM Always keep window open to see results
-echo.
-echo Press any key to close...
-pause >nul
-
-goto :end
-
-:error
-echo.
-echo ❌ Script execution failed - see errors above
-echo.
-echo Completed: %date% %time%
-echo ===============================================
-
-REM Always keep window open to see errors
-echo Press any key to close...
-pause >nul
-exit /b 1
-
-:end
+REM Keep window open briefly
+timeout /t 10
 exit /b 0

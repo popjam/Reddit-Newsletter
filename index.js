@@ -599,11 +599,40 @@ const truncate = (str, len) => {
     if (str.length <= len) return str;
     return str.substring(0, len - 3) + '...';
 };
-
 // Command line arguments
 const args = process.argv.slice(2);
 const VERBOSE_LOGGING = args.includes('--verbose') || args.includes('-v');
-const SIMPLE_LOGGING = !VERBOSE_LOGGING; // Simple logging is default
+const SIMPLE_LOGGING = !VERBOSE_LOGGING;
+
+// --- LOGGING SYSTEM (ADDED) ---
+const logFilePath = process.env.LOG_FILE;
+let logStream = null;
+
+if (logFilePath) {
+    try {
+        // Open the file defined by the batch script for writing
+        logStream = fs.createWriteStream(logFilePath, { flags: 'a', encoding: 'utf8' });
+
+        // CRITICAL FIX: Handle stream errors (like EBUSY) to prevent crashes
+        logStream.on('error', (err) => {
+            console.error(`⚠️ Logging Stream Error: ${err.message}`);
+            // Disable file logging if file is locked, fall back to console
+            logStream = null;
+        });
+    } catch (e) {
+        console.error(`Warning: Could not open log file: ${e.message}`);
+        logStream = null;
+    }
+}
+
+// Helper to write to file (Strips colors so text file is clean)
+const writeToFile = (level, message) => {
+    if (logStream) {
+        const timestamp = new Date().toLocaleTimeString('en-US', { hour12: false });
+        const cleanMessage = message ? message.toString().replace(/\u001b\[\d+m/g, '') : '';
+        logStream.write(`[${timestamp}] [${level.toUpperCase().padEnd(7)}] ${cleanMessage}\n`);
+    }
+};
 
 // Progress tracking
 let progressBar = null;
@@ -611,6 +640,8 @@ let currentSubredditIndex = 0;
 let totalSubreddits = 0;
 const completedSubreddits = [];
 let progressUpdateLock = false;
+
+// Stats object
 const stats = {
     postsProcessed: 0,
     imagePostsSkipped: 0,
@@ -624,11 +655,19 @@ const stats = {
     rateLimitHits: 0,
     retriesPerformed: 0,
     errors: [],
-    subredditDetails: new Map() // Track detailed info per subreddit
+    subredditDetails: new Map(),
+    imagesFailedToDownload: 0,
+    mercuryFailures: 0,
+    imagesOptimized: 0,
+    totalSizeSaved: 0
 };
 
 // Logging functions
 const log = (level, message) => {
+    // 1. FILE: Always write verbose logs here
+    writeToFile(level, message);
+
+    // 2. SCREEN: Only write here if user specifically asked for --verbose
     if (VERBOSE_LOGGING) {
         const timestamp = new Date().toLocaleTimeString('en-US', { hour12: false });
         const cleanMessage = message.toString().replace(/(\r\n|\n|\r)/gm, " | ");
@@ -637,6 +676,10 @@ const log = (level, message) => {
 };
 
 const simpleLog = (message) => {
+    // 1. FILE: Write this as INFO so the log is complete
+    writeToFile('INFO', message);
+
+    // 2. SCREEN: Always show simple logs (System Status, Progress Bar)
     if (SIMPLE_LOGGING) {
         console.log(message);
     }
