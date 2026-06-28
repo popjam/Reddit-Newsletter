@@ -56,6 +56,10 @@ export const defaultConfig = {
         // Image handling settings
         downloadImages: true,
 
+        // Content source: 'html' (old Reddit HTML), 'rss', 'json', or 'auto'
+        // 'html' avoids Reddit RSS/JSON for post lists and comments where possible.
+        sourceMode: 'html',
+
         // Randomize the order of subreddits in the final newsletter
         randomizeSubredditOrder: false,
 
@@ -103,7 +107,8 @@ export const defaultConfig = {
         // Rate limiting, timeouts, and reliability settings
         requestDelays: {
             oauth2: { betweenSubreddits: 1000, betweenComments: 1000, betweenImages: 500, betweenApiCalls: 1000, after429Error: 5000 },
-            unauthenticated: { betweenSubreddits: 6000, betweenComments: 6000, betweenImages: 500, betweenApiCalls: 6000, after429Error: 10000 }
+            unauthenticated: { betweenSubreddits: 6000, betweenComments: 6000, betweenImages: 500, betweenApiCalls: 6000, after429Error: 10000 },
+            html: { betweenRequests: 3000, afterBlocked: 60000 }
         },
         timeouts: { redditApi: 20000, imageDownload: 30000, mercuryParsing: 15000, galleryParsing: 20000 },
         retries: { maxAttempts: 3, baseDelay: 1000, maxDelay: 10000, exponentialBase: 2, jitterPercent: 0.2 },

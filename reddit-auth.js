@@ -254,6 +254,22 @@ function convertToOAuthUrlForAuth(url) {
     return url.replace(/^(https:\/\/)?(www\.)?reddit\.com/, 'https://oauth.reddit.com');
 }
 
+function convertFromOAuthUrlForAuth(url) {
+    if (!url) return url;
+
+    try {
+        const parsedUrl = new URL(url);
+        if (parsedUrl.hostname === 'oauth.reddit.com') {
+            parsedUrl.hostname = 'www.reddit.com';
+            return parsedUrl.toString();
+        }
+    } catch (e) {
+        return url.replace(/^(https:\/\/)?oauth\.reddit\.com/, 'https://www.reddit.com');
+    }
+
+    return url;
+}
+
 /**
  * Helper function to make authenticated Reddit API requests
  */
@@ -291,7 +307,7 @@ export async function makeAuthenticatedRedditRequest(url, options = {}) {
         authLog(`[AUTH] Error: ${error.message}`);
         
         // Fall back to unauthenticated request
-        return axios.get(url, {
+        return axios.get(convertFromOAuthUrlForAuth(url), {
             timeout: options.timeout || redditConfig.timeouts.redditApi,
             headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)' },
             ...options

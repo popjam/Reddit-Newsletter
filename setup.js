@@ -359,7 +359,8 @@ async function setupEmail(config) {
 
 async function setupRedditOAuth(config) {
     section('Reddit OAuth Configuration');
-    const useOAuth = await question(`Enable Reddit OAuth for better rate limits? (y/n) [${config.reddit.enableOAuth2 ? 'y' : 'n'}]: `) || (config.reddit.enableOAuth2 ? 'y' : 'n');
+    info('OAuth is recommended. This project can use RSS for post lists, but comments are fetched from Reddit JSON, which Reddit may block when unauthenticated.');
+    const useOAuth = await question(`Enable Reddit OAuth for more reliable comments and better rate limits? (y/n) [${config.reddit.enableOAuth2 ? 'y' : 'n'}]: `) || (config.reddit.enableOAuth2 ? 'y' : 'n');
     config.reddit.enableOAuth2 = useOAuth.toLowerCase() === 'y';
 
     if (config.reddit.enableOAuth2) {
@@ -375,6 +376,12 @@ async function setupRedditOAuth(config) {
 
 async function setupNewsletter(config) {
     section('Newsletter Content');
+    const currentSourceMode = config.reddit.sourceMode || 'html';
+    console.log('Content source options: html, rss, json, auto');
+    const sourceModeInput = await question(`Content source mode [${currentSourceMode}]: `) || currentSourceMode;
+    const sourceMode = sourceModeInput.trim().toLowerCase();
+    config.reddit.sourceMode = ['html', 'rss', 'json', 'auto'].includes(sourceMode) ? sourceMode : 'html';
+
     // Ensure subreddits are strings when displaying
     const displaySubreddits = config.reddit.subreddits
         .map(sub => typeof sub === 'string' ? sub : sub.toString())
@@ -432,6 +439,7 @@ async function saveConfiguration(config) {
             enableOAuth2: config.reddit.enableOAuth2,
             oauth2: config.reddit.enableOAuth2 ? config.reddit.oauth2 : undefined,
             downloadImages: config.reddit.downloadImages,
+            sourceMode: config.reddit.sourceMode,
             randomizeSubredditOrder: config.reddit.randomizeSubredditOrder,
             subreddits: config.reddit.subreddits,
             defaults: config.reddit.defaults

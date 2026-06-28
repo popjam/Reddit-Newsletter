@@ -187,6 +187,9 @@ crontab -e
 
 ### Common Issues
 
+**Posts appear but comments are missing:**
+- Use `sourceMode: "html"` in `user-config.json` or choose `html` in `npm run setup`. RSS/JSON modes rely on Reddit JSON for comments; HTML mode scrapes old Reddit post pages for comments.
+
 **Sharp module error on Windows:**
 ```cmd
 # Remove node_modules and reinstall from Windows

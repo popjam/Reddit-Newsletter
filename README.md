@@ -74,11 +74,12 @@ The setup wizard will guide you through:
 - **Kindle email:** Instructions on finding your Kindle email and adding your sender to the approved list
 
 #### Reddit OAuth (Recommended)
-- **Why use OAuth:** Higher rate limits (60 requests/minute vs 10) and speeds (Setup [here](https://www.reddit.com/prefs/apps)).
-- **Optional:** You can skip this for basic usage
+- **Why use OAuth:** This project can use RSS for post lists, but comments are fetched from Reddit JSON. If Reddit blocks unauthenticated JSON requests, OAuth restores reliable comment fetching and also provides higher rate limits (60 requests/minute vs 10). Setup [here](https://www.reddit.com/prefs/apps).
+- **Optional:** You can skip this for post-only usage, but comments may be missing.
 
 #### Newsletter Preferences
 - **Subreddit selection:** Enter your favorite subreddits (e.g., `worldnews, technology, AskReddit`)
+- **Content source mode:** Choose `html`, `rss`, `json`, or `auto` (`html` is the default)
 - **Posts per subreddit:** How many posts to include 
 - **Comments per post:** How many top comments to include 
 - **Time period:** Daily, weekly, monthly, or yearly top posts
@@ -162,7 +163,10 @@ crontab -e
 Configurations can be made in user-config.json. Subreddit configurations can be global or subreddit specific.
 
 ### Subreddit Settings
+- **sourceMode:** Content source to use: `html`, `rss`, `json`, or `auto`. The default is `html`, which scrapes old Reddit HTML for post lists and comments.
 - **commentsPerPost:** Amount of top level comments for each post.
+- **OAuth note:** In `rss` and `json` modes, comments use Reddit's JSON API. In `html` mode, comments are scraped from old Reddit HTML instead.
+- **HTML throttling:** `reddit.requestDelays.html.betweenRequests` controls old Reddit request spacing. `reddit.requestDelays.html.afterBlocked` is the first wait after a 403/429 block; retries increase from there with jitter.
 - **sort:** hot, new, top, controversial, best, rising
 - **timeframe:** hour, day, week, month, year, all
 - **includeInternalLinks:** Include/exclude self posts

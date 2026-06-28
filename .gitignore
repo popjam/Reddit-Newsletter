@@ -14,6 +14,7 @@ user-config.json
 
 # Runtime statistics file
 .reddit-stats.json
+html-scrape-*.json
 
 # Personal/temporary files that should not be committed
 newsletter-log.txt

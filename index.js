@@ -78,6 +78,7 @@ const { reddit: redditConfig, epub: epubConfig, version: SCRIPT_VERSION } = conf
 let throttleUntil = 0; // NEW: Global timestamp for throttling. All API requests will pause until this time.
 let consecutive429Errors = 0; // Track consecutive 429 errors for escalating backoff
 let lastRateLimitTime = 0; // Track when we last got rate limited
+let warnedAboutPublicCommentApi = false;
 
 // CONCURRENCY DISABLED - All operations now run sequentially
 // Dynamic concurrency control - COMMENTED OUT
@@ -108,8 +109,12 @@ function addJitter(delay, jitterPercent = config.reddit.retries.jitterPercent) {
 // Get appropriate request delays based on OAuth2 authentication status
 function getRequestDelays() {
     // MODIFIED: Check if OAuth is blocked, not just enabled/configured
-    const isOAuth2Active = config.reddit.enableOAuth2 && redditAuth.isConfigured() && !redditAuth.oauthBlocked;
+    const isOAuth2Active = isOAuthReady();
     return isOAuth2Active ? config.reddit.requestDelays.oauth2 : config.reddit.requestDelays.unauthenticated;
+}
+
+function isOAuthReady() {
+    return config.reddit.enableOAuth2 && redditAuth.isConfigured() && !redditAuth.oauthBlocked;
 }
 
 // Calculate exponential backoff delay
@@ -230,7 +235,7 @@ async function makeRedditApiRequest(url, options = {}) {
         await sleep(getRequestDelays().betweenApiCalls);
 
         // Check if OAuth is blocked
-        const useOAuth = config.reddit.enableOAuth2 && redditAuth.isConfigured() && !redditAuth.oauthBlocked;
+        const useOAuth = isOAuthReady();
 
         const result = await withRetry(
             () => {
@@ -361,6 +366,12 @@ function sanitizeHtmlForEpub(html) {
 
     // Basic attribute cleanup - remove style, class, id, etc.
     sanitized = sanitized.replace(/\s(style|class|id|onclick|onload|data-[^=]*)\s*=\s*["'][^"']*["']/gi, '');
+
+    // Escape stray angle brackets and pseudo-tags in comment/article text.
+    sanitized = sanitized.replace(/<(?!(?:\/?(?:p|br|hr|a|strong|em|i|b|u|blockquote|ul|ol|li|code|pre|h[1-6]|div|span|img)\b|!--))/gi, '&lt;');
+
+    // XHTML requires literal ampersands in text and attributes to be escaped.
+    sanitized = sanitized.replace(/&(?![a-zA-Z]{2,8};|#[0-9]{2,6};|#x[0-9a-fA-F]{2,6};)/g, '&amp;');
 
     return sanitized.trim();
 }
@@ -640,6 +651,7 @@ let currentSubredditIndex = 0;
 let totalSubreddits = 0;
 const completedSubreddits = [];
 let progressUpdateLock = false;
+let currentProgressContext = { subreddit: 'all', detail: '' };
 
 // Stats object
 const stats = {
@@ -659,7 +671,16 @@ const stats = {
     imagesFailedToDownload: 0,
     mercuryFailures: 0,
     imagesOptimized: 0,
-    totalSizeSaved: 0
+    totalSizeSaved: 0,
+    commentsFetched: 0,
+    postsWithoutComments: 0,
+    commentFetchFailures: 0,
+    commentAuthFailures: 0,
+    htmlRequests: 0,
+    htmlBlockedRequests: 0,
+    htmlRetries: 0,
+    sourceFailures: 0,
+    sourceEmpty: 0
 };
 
 // Logging functions
@@ -674,6 +695,11 @@ const log = (level, message) => {
         console.log(`[${timestamp}] [${level.toUpperCase().padEnd(7)}] ${cleanMessage}`);
     }
 };
+
+function recordWarning(message) {
+    stats.errors.push(message);
+    log('warn', message);
+}
 
 const simpleLog = (message) => {
     // 1. FILE: Write this as INFO so the log is complete
@@ -696,7 +722,13 @@ const updateProgress = async (subredditName, status = 'processing', message = ''
                 'downloading': '📥 Downloading images...',
                 'completed': '✅ Done',
                 'rate_limited': '⏳ Rate limited, waiting...',
-                'parsing': '📖 Processing articles...'
+                'parsing': '📖 Processing articles...',
+                'html_fetch': '🌐 Fetching old Reddit HTML...',
+                'retrying': '⏳ Retrying after block...',
+                'post': '🧩 Processing post...',
+                'comments': '💬 Fetching comments...',
+                'empty': '⚠️ No usable posts...',
+                'blocked': '🚫 Blocked by Reddit...'
             };
 
             // For non-completion updates, don't increment currentSubredditIndex
@@ -759,7 +791,330 @@ const completeSubreddit = (subredditName, postsFound, targetPosts, details = {})
 
 function convertToOauthUrl(url) {
     if (!url) return url;
-    return url.replace(/^(https:\/\/)?(www\.)?reddit\.com/, 'https://oauth.reddit.com');
+    try {
+        const parsedUrl = new URL(url);
+        if (parsedUrl.hostname.endsWith('reddit.com') && parsedUrl.hostname !== 'oauth.reddit.com') {
+            parsedUrl.protocol = 'https:';
+            parsedUrl.hostname = 'oauth.reddit.com';
+            return parsedUrl.toString();
+        }
+        return url;
+    } catch (e) {
+        return url.replace(/^(https:\/\/)?(www\.|old\.|api\.)?reddit\.com/, 'https://oauth.reddit.com');
+    }
+}
+
+function buildRedditJsonUrl(redditUrl) {
+    if (!redditUrl) return redditUrl;
+
+    try {
+        const parsedUrl = new URL(redditUrl);
+        parsedUrl.hash = '';
+        parsedUrl.search = '';
+
+        if (!parsedUrl.pathname.endsWith('.json')) {
+            parsedUrl.pathname = parsedUrl.pathname.replace(/\/+$/, '') + '.json';
+        }
+
+        return parsedUrl.toString();
+    } catch (e) {
+        return redditUrl.replace(/[?#].*$/, '').replace(/\/+$/, '') + '.json';
+    }
+}
+
+const htmlPostDetailsCache = new Map();
+
+function normalizeSourceMode(value) {
+    const sourceMode = (value || config.reddit.sourceMode || 'html').toString().toLowerCase();
+    return ['html', 'rss', 'json', 'auto'].includes(sourceMode) ? sourceMode : 'html';
+}
+
+function decodeHtml(value = '') {
+    return decode(value)
+        .replace(/&#32;/g, ' ')
+        .replace(/\u00a0/g, ' ');
+}
+
+function stripHtmlToText(html = '') {
+    return decodeHtml(html)
+        .replace(/<br\s*\/?>/gi, '\n')
+        .replace(/<\/p>/gi, '\n\n')
+        .replace(/<[^>]+>/g, '')
+        .replace(/\n{3,}/g, '\n\n')
+        .replace(/[ \t]+/g, ' ')
+        .trim();
+}
+
+function getHtmlAttr(tag, name) {
+    const pattern = new RegExp(`${name}="([^"]*)"`, 'i');
+    const match = tag.match(pattern);
+    return match ? decodeHtml(match[1]) : '';
+}
+
+function ensureOldRedditUrl(url) {
+    if (!url) return url;
+    try {
+        const parsedUrl = new URL(url, 'https://old.reddit.com');
+        if (parsedUrl.hostname.endsWith('reddit.com')) {
+            parsedUrl.protocol = 'https:';
+            parsedUrl.hostname = 'old.reddit.com';
+        }
+        return parsedUrl.toString();
+    } catch (e) {
+        return url.replace(/^(https:\/\/)?(www\.|new\.|np\.)?reddit\.com/, 'https://old.reddit.com');
+    }
+}
+
+function normalizeRedditPermalink(permalink) {
+    if (!permalink) return '';
+    try {
+        const parsedUrl = new URL(permalink, 'https://www.reddit.com');
+        if (parsedUrl.hostname.endsWith('reddit.com')) {
+            parsedUrl.protocol = 'https:';
+            parsedUrl.hostname = 'www.reddit.com';
+        }
+        return parsedUrl.toString();
+    } catch (e) {
+        return permalink.startsWith('/') ? `https://www.reddit.com${permalink}` : permalink;
+    }
+}
+
+async function fetchOldRedditHtml(url, timeoutMs = config.reddit.timeouts.redditApi, progressContext = {}) {
+    const oldRedditUrl = ensureOldRedditUrl(url);
+    const htmlDelays = config.reddit.requestDelays.html || {};
+    const betweenRequests = htmlDelays.betweenRequests ?? 3000;
+    const initialBlockedDelay = htmlDelays.afterBlocked ?? 60000;
+    const maxAttempts = Math.max(1, config.reddit.retries.maxAttempts || 3);
+    const progressSubreddit = progressContext.subreddit || currentProgressContext.subreddit || 'html';
+    const progressDetail = progressContext.detail || currentProgressContext.detail || truncate(oldRedditUrl, 60);
+
+    for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+        try {
+            log('debug', `Fetching old Reddit HTML: ${truncate(oldRedditUrl, 80)} (attempt ${attempt}/${maxAttempts})`);
+            await updateProgress(progressSubreddit, 'html_fetch', `🌐 ${progressDetail} (${attempt}/${maxAttempts})`);
+            if (betweenRequests > 0) {
+                await sleep(addJitter(betweenRequests));
+            }
+
+            stats.htmlRequests++;
+            const response = await axios.get(oldRedditUrl, {
+                timeout: timeoutMs,
+                headers: {
+                    'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36',
+                    'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+                    'Accept-Language': 'en-US,en;q=0.9'
+                }
+            });
+
+            return response.data;
+        } catch (error) {
+            const status = error.response?.status;
+            const isBlocked = status === 403 || status === 429;
+            const responseSummary = typeof error.response?.data === 'string'
+                ? error.response.data.slice(0, 120).replace(/\s+/g, ' ')
+                : '';
+
+            if (!isBlocked || attempt === maxAttempts) {
+                const reason = status
+                    ? `old Reddit HTML request failed with HTTP ${status} for ${oldRedditUrl}${responseSummary ? ` (${responseSummary})` : ''}`
+                    : `old Reddit HTML request failed for ${oldRedditUrl}: ${error.message}`;
+                throw new Error(reason);
+            }
+
+            stats.htmlBlockedRequests++;
+            stats.htmlRetries++;
+
+            const retryAfterHeader = error.response?.headers?.['retry-after'];
+            const retryAfterMs = retryAfterHeader && !Number.isNaN(Number.parseInt(retryAfterHeader, 10))
+                ? (Number.parseInt(retryAfterHeader, 10) * 1000)
+                : 0;
+            const exponentialDelay = initialBlockedDelay * Math.pow(2, attempt - 1);
+            const waitMs = addJitter(Math.max(retryAfterMs, exponentialDelay));
+            const waitSeconds = Math.round(waitMs / 1000);
+
+            recordWarning(`old Reddit HTML returned HTTP ${status} for ${oldRedditUrl}; waiting ${waitSeconds}s before retry ${attempt + 1}/${maxAttempts}`);
+            await updateProgress(progressSubreddit, 'blocked', `🚫 HTML ${status} while ${progressDetail}; retry in ${waitSeconds}s (${attempt + 1}/${maxAttempts})`);
+            await sleep(waitMs);
+        }
+    }
+}
+
+function buildOldRedditListingUrl(resolvedConfig) {
+    const { name, sort, timeframe } = resolvedConfig;
+    const normalizedSort = (sort || 'hot').toLowerCase();
+    const sortPath = normalizedSort && normalizedSort !== 'hot' ? `${normalizedSort}/` : '';
+    const needsTimeframe = (normalizedSort === 'top' || normalizedSort === 'controversial') && timeframe;
+    const query = needsTimeframe ? `?t=${encodeURIComponent(timeframe)}` : '';
+    return `https://old.reddit.com/r/${encodeURIComponent(name)}/${sortPath}${query}`;
+}
+
+function parseOldRedditListing(html, resolvedConfig) {
+    const entries = [];
+    const postStartRegex = /<div class=" thing[^>]*data-type="link"[^>]*>/gi;
+    const starts = [...html.matchAll(postStartRegex)];
+
+    for (let i = 0; i < starts.length; i++) {
+        const tag = starts[i][0];
+        const startIndex = starts[i].index;
+        const endIndex = starts[i + 1]?.index ?? html.length;
+        const segment = html.slice(startIndex, endIndex);
+        const className = getHtmlAttr(tag, 'class');
+        const dataUrl = getHtmlAttr(tag, 'data-url');
+        const rawPermalink = getHtmlAttr(tag, 'data-permalink');
+        const permalink = normalizeRedditPermalink(rawPermalink);
+        const author = getHtmlAttr(tag, 'data-author') || 'unknown';
+        const domain = getHtmlAttr(tag, 'data-domain');
+        const fullName = getHtmlAttr(tag, 'data-fullname');
+        const timestamp = Number.parseInt(getHtmlAttr(tag, 'data-timestamp') || '0', 10);
+        const score = getHtmlAttr(tag, 'data-score') || '0';
+        const numComments = getHtmlAttr(tag, 'data-comments-count') || '0';
+        const subreddit = getHtmlAttr(tag, 'data-subreddit') || resolvedConfig.name;
+        const isGallery = getHtmlAttr(tag, 'data-is-gallery') === 'true' || dataUrl.includes('/gallery/');
+        const isPromoted = getHtmlAttr(tag, 'data-promoted') === 'true';
+        const isStickied = className.includes('stickied');
+
+        if (!permalink || isPromoted || isStickied || dataUrl.includes('/live/')) continue;
+
+        const titleMatch = segment.match(/<a[^>]+class="[^"]*\btitle\b[^"]*"[^>]*>([\s\S]*?)<\/a>/i);
+        const title = stripHtmlToText(titleMatch?.[1] || '');
+        if (!title) continue;
+
+        const imagePreviewMatch = segment.match(/<a[^>]+class="[^"]*\bthumbnail\b[^"]*"[^>]*>[\s\S]*?<img[^>]+src="([^"]+)"/i);
+        const previewImage = imagePreviewMatch ? decodeHtml(imagePreviewMatch[1]) : '';
+        const isSelf = domain === 'self' || domain === `self.${subreddit}` || dataUrl === rawPermalink || dataUrl === permalink;
+        const postHint = isGallery ? 'gallery' : isImageUrl(dataUrl) || dataUrl.includes('i.redd.it') ? 'image' : '';
+        const externalUrl = isSelf ? permalink : dataUrl;
+
+        const descriptionParts = [
+            `<p><a href="${escapeXml(externalUrl)}">[link]</a> <a href="${escapeXml(permalink)}">[comments]</a></p>`
+        ];
+        if (previewImage && isImageUrl(previewImage)) {
+            descriptionParts.push(`<a href="${escapeXml(previewImage)}"><img src="${escapeXml(previewImage)}" alt="${escapeXml(title)}" /></a>`);
+        }
+
+        entries.push({
+            title: [title],
+            link: [{ $: { href: permalink } }],
+            description: [descriptionParts.join('')],
+            pubDate: [timestamp ? new Date(timestamp).toUTCString() : new Date().toUTCString()],
+            id: [fullName || `t3_${Math.random().toString(36).slice(2)}`],
+            guid: [{ $: { isPermaLink: "false" }, _: fullName || permalink }],
+            url: externalUrl,
+            permalink,
+            selftext: '',
+            selftext_html: '',
+            'reddit:permalink': [permalink],
+            'reddit:score': [score],
+            'reddit:author': [author],
+            'reddit:subreddit': [subreddit],
+            'reddit:num_comments': [numComments],
+            _sourceMethod: 'HTML',
+            _rawRedditData: {
+                id: (fullName || '').replace(/^t3_/, ''),
+                title,
+                url: externalUrl,
+                permalink: new URL(permalink).pathname,
+                author,
+                subreddit,
+                score: Number.parseInt(score, 10) || 0,
+                num_comments: Number.parseInt(numComments, 10) || 0,
+                domain,
+                post_hint: postHint,
+                is_gallery: isGallery
+            }
+        });
+    }
+
+    return entries;
+}
+
+function extractFirstMarkdownBody(html) {
+    const match = html.match(/<div class="usertext-body[^"]*"[^>]*>\s*<div class="md">([\s\S]*?)<\/div>\s*<\/div>/i);
+    return match ? match[1].trim() : '';
+}
+
+function extractOldRedditPostHtml(html) {
+    const postStartMatch = html.match(/<div class=" thing[^"]*\bid-t3_[^"]*\blink\b[^"]*"[^>]*data-type="link"[^>]*>/i);
+    if (!postStartMatch || postStartMatch.index === undefined) return '';
+
+    const startIndex = postStartMatch.index;
+    const boundaryCandidates = [
+        html.indexOf('<section class="infobar commentsignupbar"', startIndex),
+        html.indexOf('<div class="commentarea"', startIndex),
+        html.indexOf('<div id="siteTable_t3_', startIndex + postStartMatch[0].length)
+    ].filter(index => index > startIndex);
+    const endIndex = boundaryCandidates.length > 0 ? Math.min(...boundaryCandidates) : html.length;
+
+    return html.slice(startIndex, endIndex);
+}
+
+function parseOldRedditPostDetails(html, postUrl) {
+    const postHtml = extractOldRedditPostHtml(html);
+    const selftextHtml = extractFirstMarkdownBody(postHtml);
+    const crosspostMatch = postHtml.match(/<div class="crosspost-preview[\s\S]*?<\/div>\s*<\/div>/i);
+    const crosspostHtml = crosspostMatch ? crosspostMatch[0] : '';
+
+    return {
+        postUrl,
+        selftextHtml,
+        crosspostHtml,
+        comments: parseOldRedditComments(html)
+    };
+}
+
+function parseOldRedditComments(html) {
+    const comments = [];
+    const commentStartRegex = /<div class=" thing[^"]*id-t1_[^"]*comment[^"]*"[^>]*>/gi;
+    const starts = [...html.matchAll(commentStartRegex)];
+
+    for (let i = 0; i < starts.length; i++) {
+        const tag = starts[i][0];
+        const startIndex = starts[i].index;
+        const endIndex = starts[i + 1]?.index ?? html.length;
+        const segment = html.slice(startIndex, endIndex);
+        const className = getHtmlAttr(tag, 'class');
+        const author = getHtmlAttr(tag, 'data-author');
+        const permalink = getHtmlAttr(tag, 'data-permalink');
+
+        if (!author || author === '[deleted]') continue;
+        if (/\bdeleted\b/.test(className) || /\bcollapsed\b/.test(className)) continue;
+
+        const bodyHtml = extractFirstMarkdownBody(segment);
+        const bodyText = stripHtmlToText(bodyHtml);
+        if (!bodyHtml || !bodyText || bodyText === '[deleted]' || bodyText === '[removed]') continue;
+
+        comments.push({
+            author,
+            text: bodyHtml,
+            replies: [],
+            permalink: permalink ? normalizeRedditPermalink(permalink) : null
+        });
+    }
+
+    return comments;
+}
+
+async function getOldRedditPostDetails(postUrl) {
+    const oldPostUrl = ensureOldRedditUrl(postUrl);
+    if (htmlPostDetailsCache.has(oldPostUrl)) {
+        return htmlPostDetailsCache.get(oldPostUrl);
+    }
+
+    const html = await fetchOldRedditHtml(oldPostUrl, config.reddit.timeouts.redditApi, currentProgressContext);
+    const details = parseOldRedditPostDetails(html, oldPostUrl);
+    htmlPostDetailsCache.set(oldPostUrl, details);
+    htmlPostDetailsCache.set(normalizeRedditPermalink(postUrl), details);
+    return details;
+}
+
+async function fetchHtmlFeed(resolvedConfig) {
+    const listingUrl = buildOldRedditListingUrl(resolvedConfig);
+    const html = await fetchOldRedditHtml(listingUrl, config.reddit.timeouts.redditApi, {
+        subreddit: resolvedConfig._subredditName || resolvedConfig.name,
+        detail: `listing ${resolvedConfig.sort || 'hot'}${resolvedConfig.timeframe ? `/${resolvedConfig.timeframe}` : ''}`
+    });
+    const entries = parseOldRedditListing(html, resolvedConfig);
+    return { rss: { channel: [{ item: entries }] } };
 }
 
 const imagesDir = path.join(__dirname, 'epub_images');
@@ -1187,10 +1542,28 @@ async function withTimeout(promise, timeoutMs, context = 'operation') {
 
 async function fetchComments(postUrl, maxComments, resolvedConfig, attempt = 1) {
     try {
+        if (!maxComments || maxComments <= 0) return [];
+
+        if (normalizeSourceMode(resolvedConfig.sourceMode) === 'html') {
+            const details = await getOldRedditPostDetails(postUrl);
+            let htmlComments = details.comments || [];
+            if (resolvedConfig.skipAutoModerator) {
+                htmlComments = htmlComments.filter(comment => comment.author !== 'AutoModerator');
+            }
+            const processedComments = htmlComments.slice(0, maxComments);
+            stats.commentsFetched += processedComments.length;
+            if (processedComments.length === 0) {
+                stats.postsWithoutComments++;
+            }
+            return processedComments;
+        }
+
         await sleep(getRequestDelays().betweenComments);
-        let url = `${postUrl}.json`;
-        if (config.reddit.enableOAuth2 && redditAuth.isConfigured()) {
-            url = convertToOauthUrl(url);
+        const url = buildRedditJsonUrl(postUrl);
+
+        if (!isOAuthReady() && !warnedAboutPublicCommentApi) {
+            warnedAboutPublicCommentApi = true;
+            log('warn', 'Reddit OAuth is not active. Public Reddit JSON comment endpoints are often blocked, so comments may be missing. Run "npm run setup" and enable Reddit OAuth to restore comments.');
         }
 
         // Progressive timeout: increase timeout based on number of comments requested and attempt number
@@ -1223,8 +1596,20 @@ async function fetchComments(postUrl, maxComments, resolvedConfig, attempt = 1) 
             return [];
         }
 
-        return processComments(postData.slice(0, maxComments), resolvedConfig);
+        const processedComments = processComments(postData.slice(0, maxComments), resolvedConfig);
+        stats.commentsFetched += processedComments.length;
+        if (processedComments.length === 0) {
+            stats.postsWithoutComments++;
+        }
+        return processedComments;
     } catch (error) {
+        stats.commentFetchFailures++;
+        if (error.response?.status === 403 && !isOAuthReady()) {
+            stats.commentAuthFailures++;
+            log('warn', `Reddit blocked public comment API access for ${truncate(postUrl, 60)}. Enable Reddit OAuth in setup to fetch comments.`);
+            return [];
+        }
+
         // More aggressive retry logic with exponential backoff
         const maxRetries = Math.max(config.reddit.retries.maxAttempts * 2, 6); // At least 6 attempts for comments
 
@@ -1703,11 +2088,31 @@ async function processSinglePost(entry, currentPostNum, totalPostsInSub, sourceS
         const subreddit = extractSubreddit(redditLink);
 
         log('process', `(${currentPostNum}/${totalPostsInSub}) [r/${subreddit}] Processing: "${truncate(title, 60)}"`);
+        currentProgressContext = {
+            subreddit: sourceSubredditName,
+            detail: `post ${currentPostNum}/${totalPostsInSub}: ${truncate(title, 45)}`
+        };
+        await updateProgress(sourceSubredditName, 'post', `🧩 Post ${currentPostNum}/${totalPostsInSub}: ${truncate(title, 45)}`);
 
         let postContent = entry.content?.[0]?._ || entry.description?.[0] || '';
         const articleLinkRegex = /<a href="([^"]+)">\[link\]<\/a>/;
         const match = postContent.match(articleLinkRegex);
         let externalUrl = entry.url || (match ? match[1] : null);
+        let htmlDetails = null;
+
+        if (normalizeSourceMode(resolvedConfig.sourceMode) === 'html') {
+            try {
+                htmlDetails = await getOldRedditPostDetails(redditLink);
+                if (!entry.selftext_html && htmlDetails.selftextHtml) {
+                    entry.selftext_html = htmlDetails.selftextHtml;
+                }
+                if (!entry.selftext_html && htmlDetails.crosspostHtml) {
+                    entry.selftext_html = htmlDetails.crosspostHtml;
+                }
+            } catch (error) {
+                log('warn', `Could not fetch old Reddit post details for ${truncate(redditLink, 60)}: ${error.message}`);
+            }
+        }
 
         // Check if this post has an image based on Reddit's metadata
         const rawData = entry._rawRedditData;
@@ -1733,7 +2138,12 @@ async function processSinglePost(entry, currentPostNum, totalPostsInSub, sourceS
             }
         }
 
-        const isLinkPost = externalUrl && externalUrl !== redditLink;
+        const isHtmlRedditCrosspost = normalizeSourceMode(resolvedConfig.sourceMode) === 'html' &&
+            htmlDetails?.crosspostHtml &&
+            externalUrl &&
+            isInternalRedditLink(externalUrl);
+
+        const isLinkPost = externalUrl && externalUrl !== redditLink && !isHtmlRedditCrosspost;
 
         if (isLinkPost) {
             if (isImageUrl(externalUrl) || hasRedditImage) {
@@ -1921,6 +2331,11 @@ async function processSinglePost(entry, currentPostNum, totalPostsInSub, sourceS
         postContent += `<hr /><p><strong>Discussion on Reddit:</strong> <a href="${redditLink}">${redditLink}</a></p>`;
 
         log('debug', `Starting comment fetch for: ${truncate(title, 60)}`);
+        currentProgressContext = {
+            subreddit: sourceSubredditName,
+            detail: `comments ${currentPostNum}/${totalPostsInSub}: ${truncate(title, 45)}`
+        };
+        await updateProgress(sourceSubredditName, 'comments', `💬 Comments ${currentPostNum}/${totalPostsInSub}: ${truncate(title, 45)}`);
         const comments = await fetchComments(redditLink, resolvedConfig.commentsPerPost, resolvedConfig);
         log('debug', `Comment fetch completed for: ${truncate(title, 60)}`);
         log('success', `Finished processing "${truncate(title, 60)}"`);
@@ -1961,41 +2376,75 @@ async function processSubredditFeedInternal(resolvedConfig) {
         autoModPostsSkipped: 0,
         internalLinksSkipped: 0,
         fallbackImagePostsIncluded: 0,
-        sourceMethod: 'unknown'
+        sourceMethod: 'unknown',
+        sourceFailures: [],
+        failureReason: null
     };
 
-    // Try authenticated first, then fall back to RSS
+    const sourceMode = normalizeSourceMode(resolvedConfig.sourceMode);
     let rssData = null;
 
-    if (config.reddit.enableOAuth2 && redditAuth.isConfigured()) {
-        try {
-            // Request more posts than needed to account for filtering (up to 100, Reddit's limit)
-            const requestLimit = Math.min(100, postsPerSubreddit * 4); // 4x buffer for filtering
-            const limitParam = timeString ? `&limit=${requestLimit}` : `?limit=${requestLimit}`;
-            const authUrl = `https://oauth.reddit.com/r/${name}${sortString}.json${timeString}${limitParam}`;
-            rssData = await fetchRssFeed(authUrl, true); // true indicates JSON mode
-            subredditStats.sourceMethod = 'OAuth2 API';
-        } catch (error) {
-            log('warn', `OAuth request failed for ${displayString}: ${error.message}, falling back to RSS`);
-            rssData = null;
-        }
-    }
+    const tryHtmlSource = async () => {
+        const data = await fetchHtmlFeed(resolvedConfig);
+        subredditStats.sourceMethod = 'Old Reddit HTML';
+        return data;
+    };
 
-    if (!rssData) {
+    const tryJsonSource = async () => {
+        // Request more posts than needed to account for filtering (up to 100, Reddit's limit)
+        const requestLimit = Math.min(100, postsPerSubreddit * 4); // 4x buffer for filtering
+        const limitParam = timeString ? `&limit=${requestLimit}` : `?limit=${requestLimit}`;
+        const host = isOAuthReady() ? 'https://oauth.reddit.com' : 'https://www.reddit.com';
+        const jsonUrl = `${host}/r/${name}${sortString}.json${timeString}${limitParam}`;
+        const data = await fetchRssFeed(jsonUrl, true); // true indicates JSON mode
+        subredditStats.sourceMethod = isOAuthReady() ? 'OAuth2 API' : 'Public JSON API';
+        return data;
+    };
+
+    const tryRssSource = async () => {
+        // RSS feeds are limited to ~25 posts by Reddit, but we can still try
+        const rssUrl = `https://www.reddit.com/r/${name}${sortString}/.rss${timeString}`;
+        const data = await fetchRssFeed(rssUrl, false); // false indicates RSS mode
+        subredditStats.sourceMethod = 'RSS Feed';
+        return data;
+    };
+
+    const sourceAttempts = sourceMode === 'auto'
+        ? [
+            ['HTML', tryHtmlSource],
+            ['JSON', tryJsonSource],
+            ['RSS', tryRssSource]
+        ]
+        : sourceMode === 'html'
+            ? [['HTML', tryHtmlSource]]
+            : sourceMode === 'json'
+                ? [['JSON', tryJsonSource]]
+                : [['RSS', tryRssSource]];
+
+    for (let i = 0; i < sourceAttempts.length && !rssData; i++) {
+        const [sourceLabel, sourceFetcher] = sourceAttempts[i];
         try {
-            // RSS feeds are limited to ~25 posts by Reddit, but we can still try
-            const rssUrl = `https://www.reddit.com/r/${name}${sortString}/.rss${timeString}`;
-            rssData = await fetchRssFeed(rssUrl, false); // false indicates RSS mode
-            subredditStats.sourceMethod = 'RSS Feed';
+            rssData = await sourceFetcher();
         } catch (error) {
-            log('error', `Both OAuth and RSS requests failed for ${displayString}: ${error.message}`);
+            const hasFallback = i < sourceAttempts.length - 1;
+            const message = `${sourceLabel} request failed for ${displayString}: ${error.message}${hasFallback ? ', trying next source' : ''}`;
+            subredditStats.sourceFailures.push({ source: sourceLabel, error: error.message });
+            subredditStats.failureReason = error.message;
+            stats.sourceFailures++;
+            recordWarning(message);
+            await updateProgress(name, hasFallback ? 'retrying' : 'blocked', `${hasFallback ? '⏳' : '🚫'} ${sourceLabel} failed: ${truncate(error.message, 70)}`);
             rssData = null;
         }
     }
 
     const entries = rssData?.feed?.entry || rssData?.rss?.channel?.[0]?.item;
     if (!rssData || !entries || entries.length === 0) {
-        log('warn', `Could not get posts from ${displayString}. Skipping.`);
+        stats.sourceEmpty++;
+        subredditStats.failureReason = subredditStats.failureReason || 'No entries returned from configured source';
+        subredditStats.metTarget = false;
+        recordWarning(`Could not get posts from ${displayString}. Skipping. Reason: ${subredditStats.failureReason}`);
+        await updateProgress(name, 'empty', `⚠️ 0/${postsPerSubreddit}: ${truncate(subredditStats.failureReason, 70)}`);
+        completeSubreddit(resolvedConfig._subredditName || resolvedConfig.name, 0, postsPerSubreddit, subredditStats);
         return [];
     }
 
@@ -2160,7 +2609,7 @@ async function processSubredditFeedInternal(resolvedConfig) {
     }
 
     const entriesToProcess = validEntries;
-    await updateProgress(name, 'parsing');
+    await updateProgress(name, 'parsing', `📖 Processing ${entriesToProcess.length}/${postsPerSubreddit} posts...`);
 
     // Process posts sequentially (NO CONCURRENCY)  
     const results = [];
@@ -2216,6 +2665,7 @@ async function main() {
         }
 
         simpleLog(`📊 System Status:`);
+        simpleLog(`   • Source mode: ${normalizeSourceMode(config.reddit.sourceMode).toUpperCase()}`);
         simpleLog(`   • OAuth2: ${oauthStatus}`);
         simpleLog(`   • Images: ${config.reddit.downloadImages ? '✅ Downloading' : '❌ Skipping'}`);
         simpleLog(`   • Default posts per subreddit: ${config.reddit.defaults.postsPerSubreddit}`);
@@ -2395,8 +2845,22 @@ async function main() {
             console.log(`   • Images: ${imageFiles.length} downloaded`);
         }
 
+        if (stats.commentAuthFailures > 0) {
+            console.log(`   • Comments blocked: ${stats.commentAuthFailures} posts need Reddit OAuth`);
+        } else if (stats.commentFetchFailures > 0) {
+            console.log(`   • Comment fetch warnings: ${stats.commentFetchFailures}`);
+        }
+
         if (stats.errors.length > 0) {
             console.log(`   • Warnings: ${stats.errors.length}`);
+        }
+
+        if (stats.htmlBlockedRequests > 0) {
+            console.log(`   • old Reddit HTML blocks: ${stats.htmlBlockedRequests} (${stats.htmlRetries} retries)`);
+        }
+
+        if (stats.sourceFailures > 0 || stats.sourceEmpty > 0) {
+            console.log(`   • Source failures/empty: ${stats.sourceFailures}/${stats.sourceEmpty}`);
         }
 
         console.log(`\n💡 For detailed breakdown: node index.js --stats`);
@@ -2406,7 +2870,10 @@ async function main() {
             underperformingSubs,
             totalPosts,
             completedSubreddits,
-            stats,
+            stats: {
+                ...stats,
+                subredditDetails: Object.fromEntries(stats.subredditDetails)
+            },
             imageFiles: imageFiles.length,
             config: {
                 enableOAuth2: config.reddit.enableOAuth2,
@@ -2437,7 +2904,25 @@ async function main() {
         if (config.reddit.downloadImages) {
             log('summary', `Successfully downloaded and embedded ${imageFiles.length} images.`);
         }
-        const hasIssues = Object.values(stats).some(value => value > 0);
+        const issueCounters = [
+            stats.imagePostsSkipped,
+            stats.galleryPostsSkipped,
+            stats.videoPostsSkipped,
+            stats.autoModPostsSkipped,
+            stats.unfetchableArticlesSkipped,
+            stats.largeImagesSkipped,
+            stats.internalLinksSkipped,
+            stats.rateLimitHits,
+            stats.retriesPerformed,
+            stats.imagesFailedToDownload,
+            stats.mercuryFailures,
+            stats.commentFetchFailures,
+            stats.commentAuthFailures,
+            stats.htmlBlockedRequests,
+            stats.sourceFailures,
+            stats.sourceEmpty
+        ];
+        const hasIssues = issueCounters.some(value => value > 0);
         if (hasIssues) {
             log('summary', `--------------------------------------------------`);
             log('summary', `Issues & Skipped Items Report:`);
@@ -2453,8 +2938,17 @@ async function main() {
                 const savedMB = (stats.totalSizeSaved / 1024 / 1024).toFixed(1);
                 log('summary', `  - Optimized ${stats.imagesOptimized} large images, saved ${savedMB}MB total.`);
             }
+            if (stats.postsWithoutComments > 0) log('summary', `  - ${stats.postsWithoutComments} posts had no comments after filtering.`);
+            if (stats.commentAuthFailures > 0) log('summary', `  - Reddit blocked public comment API access for ${stats.commentAuthFailures} posts. Enable Reddit OAuth in setup to fetch comments.`);
+            if (stats.commentFetchFailures > 0 && stats.commentAuthFailures === 0) log('summary', `  - Failed to fetch comments for ${stats.commentFetchFailures} posts.`);
+            if (stats.htmlBlockedRequests > 0) log('summary', `  - old Reddit HTML was blocked ${stats.htmlBlockedRequests} times and retried ${stats.htmlRetries} times.`);
+            if (stats.sourceFailures > 0) log('summary', `  - Source fetch failed ${stats.sourceFailures} times.`);
+            if (stats.sourceEmpty > 0) log('summary', `  - ${stats.sourceEmpty} subreddit source requests returned no entries.`);
             if (stats.retriesPerformed > 0) log('summary', `  - Performed ${stats.retriesPerformed} retries for failed requests.`);
             if (stats.rateLimitHits > 0) log('summary', `  - Hit rate limits ${stats.rateLimitHits} times (handled automatically).`);
+        }
+        if (stats.commentsFetched > 0) {
+            log('summary', `Fetched ${stats.commentsFetched} comments.`);
         }
     } else {
         log('summary', `No valid posts were found to generate an EPUB.`);
@@ -2512,6 +3006,7 @@ if (args.includes('--config')) {
 
     // Display defaults
     console.log('\n⚙️ Default Settings:');
+    console.log(`  Source mode: ${normalizeSourceMode(config.reddit.sourceMode)}`);
     console.log(`  Posts per subreddit: ${config.reddit.defaults.postsPerSubreddit}`);
     console.log(`  Comments per post: ${config.reddit.defaults.commentsPerPost}`);
     console.log(`  Sorting: ${config.reddit.defaults.sort}`);
@@ -2569,6 +3064,14 @@ if (args.includes('--stats')) {
                 }
 
                 console.log(`   📡 Source: ${details.sourceMethod} (${details.totalEntriesAvailable} available)`);
+                if (details.failureReason) {
+                    console.log(`   ❌ Reason: ${details.failureReason}`);
+                }
+                if (details.sourceFailures && details.sourceFailures.length > 0) {
+                    details.sourceFailures.forEach(failure => {
+                        console.log(`   ❌ ${failure.source}: ${failure.error}`);
+                    });
+                }
             });
         }
 
