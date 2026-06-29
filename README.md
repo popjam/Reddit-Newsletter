@@ -171,7 +171,7 @@ Configurations can be made in user-config.json. Subreddit configurations can be 
 - **timeframe:** hour, day, week, month, year, all
 - **includeInternalLinks:** Include/exclude self posts
 - **skipUnfetchableArticles:** If the articles text cannot be fetched, skip the post.
-- **commentStyle:** threaded or nested. Nested will include all child comments up to the specified depth. Threaded will only include the top "chain" of comments up to the specified depth, better simulating a conversation.
+- **commentStyle:** `threaded`, `nested`, or `html`. In HTML source mode, `threaded` automatically uses the new `html` view, which preserves old Reddit's visible comment order and indentation.
 - **minCommentLength:** Will skip comments under this amount of characters. In threaded, only applies to top level comments.
 
 ### General Settings

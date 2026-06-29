@@ -81,6 +81,8 @@ export const defaultConfig = {
             skipUnfetchableArticles: false,
             skipAutoModerator: true,
             allowImagePostsIfCantFindOtherPosts: true,
+            // Comment display: 'threaded', 'nested', or 'html'.
+            // HTML source mode automatically uses 'html' unless overridden away from threaded.
             commentStyle: 'threaded',
             maxCommentDepth: 3,
             minCommentLength: 0,

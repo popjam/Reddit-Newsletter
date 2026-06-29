@@ -14,6 +14,7 @@ import { makeAuthenticatedRedditRequest, redditAuth } from './reddit-auth.js';
 import { generateDatedCover } from './cover-generator.js';
 import cliProgress from 'cli-progress';
 import { spawn } from 'child_process';
+import { JSDOM } from 'jsdom';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -1067,35 +1068,61 @@ function parseOldRedditPostDetails(html, postUrl) {
 }
 
 function parseOldRedditComments(html) {
-    const comments = [];
-    const commentStartRegex = /<div class=" thing[^"]*id-t1_[^"]*comment[^"]*"[^>]*>/gi;
-    const starts = [...html.matchAll(commentStartRegex)];
+    try {
+        const dom = new JSDOM(html);
+        const document = dom.window.document;
+        const commentNodes = [...document.querySelectorAll('.commentarea .thing.comment[id^="thing_t1_"], .commentarea .thing[id^="thing_t1_"]')];
+        const roots = [];
+        const stack = [];
 
-    for (let i = 0; i < starts.length; i++) {
-        const tag = starts[i][0];
-        const startIndex = starts[i].index;
-        const endIndex = starts[i + 1]?.index ?? html.length;
-        const segment = html.slice(startIndex, endIndex);
-        const className = getHtmlAttr(tag, 'class');
-        const author = getHtmlAttr(tag, 'data-author');
-        const permalink = getHtmlAttr(tag, 'data-permalink');
+        for (const node of commentNodes) {
+            const className = node.getAttribute('class') || '';
+            const author = decodeHtml(node.getAttribute('data-author') || '');
+            const permalink = node.getAttribute('data-permalink') || '';
 
-        if (!author || author === '[deleted]') continue;
-        if (/\bdeleted\b/.test(className) || /\bcollapsed\b/.test(className)) continue;
+            if (!author || author === '[deleted]') continue;
+            if (/\bdeleted\b/.test(className) || /\bcollapsed\b/.test(className)) continue;
 
-        const bodyHtml = extractFirstMarkdownBody(segment);
-        const bodyText = stripHtmlToText(bodyHtml);
-        if (!bodyHtml || !bodyText || bodyText === '[deleted]' || bodyText === '[removed]') continue;
+            const directEntry = [...node.children].find(child => child.classList?.contains('entry'));
+            const bodyNode = directEntry?.querySelector('.usertext-body .md');
+            const bodyHtml = bodyNode?.innerHTML?.trim() || '';
+            const bodyText = stripHtmlToText(bodyHtml);
+            if (!bodyHtml || !bodyText || bodyText === '[deleted]' || bodyText === '[removed]') continue;
 
-        comments.push({
-            author,
-            text: bodyHtml,
-            replies: [],
-            permalink: permalink ? normalizeRedditPermalink(permalink) : null
-        });
+            let depth = 0;
+            let parent = node.parentElement;
+            while (parent && !parent.classList?.contains('commentarea')) {
+                if (parent.classList?.contains('child')) depth++;
+                parent = parent.parentElement;
+            }
+
+            const comment = {
+                author,
+                text: bodyHtml,
+                replies: [],
+                permalink: permalink ? normalizeRedditPermalink(permalink) : null,
+                htmlDepth: depth,
+                htmlOrder: roots.length
+            };
+
+            while (stack.length > 0 && stack[stack.length - 1].depth >= depth) {
+                stack.pop();
+            }
+
+            if (stack.length > 0) {
+                stack[stack.length - 1].comment.replies.push(comment);
+            } else {
+                roots.push(comment);
+            }
+
+            stack.push({ depth, comment });
+        }
+
+        return roots;
+    } catch (error) {
+        log('warn', `Could not parse old Reddit comments with DOM parser: ${error.message}`);
+        return [];
     }
-
-    return comments;
 }
 
 function normalizePreviewImageUrl(url) {
@@ -1602,17 +1629,18 @@ async function fetchComments(postUrl, maxComments, resolvedConfig, attempt = 1) 
         if (normalizeSourceMode(resolvedConfig.sourceMode) === 'html') {
             const details = await getOldRedditPostDetails(postUrl);
             let htmlComments = details.comments || [];
-            const beforeFilterCount = htmlComments.length;
+            const beforeFilterCount = countCommentsRecursive(htmlComments);
             if (resolvedConfig.skipAutoModerator) {
                 htmlComments = htmlComments.filter(comment => comment.author !== 'AutoModerator');
             }
             const processedComments = htmlComments.slice(0, maxComments);
-            stats.commentsFetched += processedComments.length;
+            const processedCommentCount = countCommentsRecursive(processedComments);
+            stats.commentsFetched += processedCommentCount;
             if (processedComments.length === 0) {
                 stats.postsWithoutComments++;
-                log('warn', `No old Reddit HTML comments parsed for ${truncate(postUrl, 60)} (parsed ${beforeFilterCount}, after filters ${htmlComments.length}).`);
+                log('warn', `No old Reddit HTML comments parsed for ${truncate(postUrl, 60)} (parsed ${beforeFilterCount}, after filters ${countCommentsRecursive(htmlComments)}).`);
             } else {
-                log('debug', `Parsed ${processedComments.length}/${beforeFilterCount} old Reddit HTML comments for ${truncate(postUrl, 60)}.`);
+                log('debug', `Parsed ${processedCommentCount}/${beforeFilterCount} old Reddit HTML comments for ${truncate(postUrl, 60)}.`);
             }
             return processedComments;
         }
@@ -1726,6 +1754,45 @@ function generateNestedCommentsHtml(comments, postConfig, depth = 0) {
     }).filter(html => html.length > 0).join('');
 }
 
+function flattenCommentsVisibleOrder(comments, maxDepth = 10, depth = 0, output = []) {
+    if (!comments || depth > maxDepth) return output;
+    for (const comment of comments) {
+        output.push({ ...comment, htmlDepth: depth });
+        flattenCommentsVisibleOrder(comment.replies || [], maxDepth, depth + 1, output);
+    }
+    return output;
+}
+
+function countCommentsRecursive(comments) {
+    if (!comments || comments.length === 0) return 0;
+    return comments.reduce((count, comment) => count + 1 + countCommentsRecursive(comment.replies || []), 0);
+}
+
+function generateHtmlVisibleCommentsHtml(comments, postConfig) {
+    if (!comments || comments.length === 0) return '';
+    const visibleComments = flattenCommentsVisibleOrder(comments, postConfig.maxCommentDepth || 10)
+        .filter(comment => comment.author && comment.text && comment.author !== '[deleted]')
+        .filter(comment => !(postConfig.skipAutoModerator && comment.author === 'AutoModerator'));
+
+    const renderedComments = [];
+    for (const comment of visibleComments) {
+        const sanitizedText = sanitizeHtmlForEpub(comment.text);
+        if (postConfig.effectiveMinLength > 0 && sanitizedText.length < postConfig.effectiveMinLength) continue;
+
+        const depth = Math.min(comment.htmlDepth || 0, postConfig.maxCommentDepth || 10);
+        const indent = depth > 0 ? Math.min(depth * 10, 50) : 0;
+        const border = depth > 0 ? 'border-left: 1px solid #999; padding-left: 8px;' : '';
+        renderedComments.push(`<div class="html-comment" style="margin-top: 1em; margin-left: ${indent}px; ${border}">
+            <p style="margin: 0; font-size: 0.9em;"><strong>${escapeXml(comment.author)}</strong></p>
+            <div style="margin: 0;">${sanitizedText}</div>
+        </div>`);
+
+        if (renderedComments.length >= postConfig.commentsPerPost) break;
+    }
+
+    return renderedComments.join('');
+}
+
 function generateThreadedCommentsHtml(comments, postConfig) {
     if (!comments || comments.length === 0) return '';
     return comments.map(comment => {
@@ -1767,6 +1834,14 @@ function generateThreadedCommentsHtml(comments, postConfig) {
 function generateCommentsHtml(comments, postConfig) {
     const safeConfig = { ...config.reddit.defaults, ...postConfig };
     const tempPostConfig = { ...safeConfig };
+    if (normalizeSourceMode(tempPostConfig.sourceMode) === 'html' && !postConfig.commentStyle) {
+        tempPostConfig.commentStyle = 'html';
+    } else if (normalizeSourceMode(tempPostConfig.sourceMode) === 'html' && tempPostConfig.commentStyle === 'threaded') {
+        tempPostConfig.commentStyle = 'html';
+    }
+    if (tempPostConfig.commentStyle === 'html') {
+        tempPostConfig.disableMinLengthIfFewerComments = true;
+    }
     tempPostConfig.effectiveMinLength = tempPostConfig.minCommentLength || 0;
     if (tempPostConfig.disableMinLengthIfFewerComments && tempPostConfig.minCommentLength > 0 && comments && comments.length > 0) {
         let validCommentCount = 0;
@@ -1784,6 +1859,10 @@ function generateCommentsHtml(comments, postConfig) {
                     depth++;
                 }
             });
+        } else if (tempPostConfig.commentStyle === 'html') {
+            validCommentCount = flattenCommentsVisibleOrder(comments, tempPostConfig.maxCommentDepth)
+                .filter(c => c.text && sanitizeHtmlForEpub(c.text).length >= tempPostConfig.minCommentLength)
+                .length;
         } else {
             validCommentCount = comments.filter(c => c.text && sanitizeHtmlForEpub(c.text).length >= tempPostConfig.minCommentLength).length;
         }
@@ -1794,6 +1873,9 @@ function generateCommentsHtml(comments, postConfig) {
     }
     if (tempPostConfig.commentStyle === 'threaded') {
         return generateThreadedCommentsHtml(comments, tempPostConfig);
+    }
+    if (tempPostConfig.commentStyle === 'html') {
+        return generateHtmlVisibleCommentsHtml(comments, tempPostConfig);
     }
     return generateNestedCommentsHtml(comments, tempPostConfig);
 }
