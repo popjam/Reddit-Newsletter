@@ -5,11 +5,11 @@
   "description": "Convert Reddit RSS feed to ePub",
   "main": "index.js",
   "scripts": {
-    "start": "node --no-deprecation index.js && node send_epub_to_kindle.js",
+    "start": "node --no-deprecation index.js --send",
     "generate": "node --no-deprecation index.js",
     "send": "node send_epub_to_kindle.js",
     "send-only": "node send_only.js",
-    "verbose": "node --no-deprecation index.js --verbose && node send_epub_to_kindle.js",
+    "verbose": "node --no-deprecation index.js --verbose --send",
     "stats": "node --no-deprecation index.js --stats",
     "config": "node --no-deprecation index.js --config",
     "cover": "node cover-generator.js",

@@ -13,6 +13,7 @@ import { defaultConfig } from './config.js'; // Import the base default config
 import { makeAuthenticatedRedditRequest, redditAuth } from './reddit-auth.js';
 import { generateDatedCover } from './cover-generator.js';
 import cliProgress from 'cli-progress';
+import { spawn } from 'child_process';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -676,6 +677,8 @@ const stats = {
     postsWithoutComments: 0,
     commentFetchFailures: 0,
     commentAuthFailures: 0,
+    postProcessingFailures: 0,
+    galleryParseFailures: 0,
     htmlRequests: 0,
     htmlBlockedRequests: 0,
     htmlRetries: 0,
@@ -1058,6 +1061,7 @@ function parseOldRedditPostDetails(html, postUrl) {
         postUrl,
         selftextHtml,
         crosspostHtml,
+        galleryImages: extractOldRedditGalleryImages(postHtml),
         comments: parseOldRedditComments(html)
     };
 }
@@ -1092,6 +1096,57 @@ function parseOldRedditComments(html) {
     }
 
     return comments;
+}
+
+function normalizePreviewImageUrl(url) {
+    if (!url) return '';
+    const decodedUrl = decodeHtml(url);
+    if (decodedUrl.startsWith('//')) return `https:${decodedUrl}`;
+    return decodedUrl;
+}
+
+function extractOldRedditGalleryImages(postHtml) {
+    const images = [];
+    const seen = new Set();
+
+    const addImage = (url) => {
+        const normalizedUrl = normalizePreviewImageUrl(url);
+        if (!normalizedUrl || seen.has(normalizedUrl)) return;
+        if (!isImageUrl(normalizedUrl)) return;
+        seen.add(normalizedUrl);
+        images.push(normalizedUrl);
+    };
+
+    const cachedHtmlMatches = [...postHtml.matchAll(/data-cachedhtml="([\s\S]*?)"\s+data-pin-condition=/gi)];
+    for (const match of cachedHtmlMatches) {
+        const cachedHtml = decodeHtml(match[1]);
+        let foundFullSizeLinks = false;
+        const hrefMatches = cachedHtml.matchAll(/<a[^>]+class="[^"]*\bgallery-item-thumbnail-link\b[^"]*"[^>]+href="([^"]+)"/gi);
+        for (const hrefMatch of hrefMatches) {
+            addImage(hrefMatch[1]);
+            foundFullSizeLinks = true;
+        }
+
+        if (foundFullSizeLinks) continue;
+
+        const previewMatches = cachedHtml.matchAll(/<img[^>]+class="[^"]*\bpreview\b[^"]*"[^>]+src="([^"]+)"/gi);
+        for (const previewMatch of previewMatches) {
+            addImage(previewMatch[1]);
+        }
+    }
+
+    const mediaPreviewMatch = postHtml.match(/data-media-ids="([^"]+)"/i);
+    if (images.length === 0 && mediaPreviewMatch) {
+        const mediaIds = decodeHtml(mediaPreviewMatch[1])
+            .split(',')
+            .map(id => id.trim())
+            .filter(Boolean);
+        for (const mediaId of mediaIds) {
+            addImage(`https://preview.redd.it/${mediaId}.jpg`);
+        }
+    }
+
+    return images;
 }
 
 async function getOldRedditPostDetails(postUrl) {
@@ -1547,6 +1602,7 @@ async function fetchComments(postUrl, maxComments, resolvedConfig, attempt = 1) 
         if (normalizeSourceMode(resolvedConfig.sourceMode) === 'html') {
             const details = await getOldRedditPostDetails(postUrl);
             let htmlComments = details.comments || [];
+            const beforeFilterCount = htmlComments.length;
             if (resolvedConfig.skipAutoModerator) {
                 htmlComments = htmlComments.filter(comment => comment.author !== 'AutoModerator');
             }
@@ -1554,6 +1610,9 @@ async function fetchComments(postUrl, maxComments, resolvedConfig, attempt = 1) 
             stats.commentsFetched += processedComments.length;
             if (processedComments.length === 0) {
                 stats.postsWithoutComments++;
+                log('warn', `No old Reddit HTML comments parsed for ${truncate(postUrl, 60)} (parsed ${beforeFilterCount}, after filters ${htmlComments.length}).`);
+            } else {
+                log('debug', `Parsed ${processedComments.length}/${beforeFilterCount} old Reddit HTML comments for ${truncate(postUrl, 60)}.`);
             }
             return processedComments;
         }
@@ -2079,6 +2138,65 @@ ${navPoints}
     log('epub', `EPUB file created successfully as "${currentEpubFilename}"`);
 }
 
+async function buildGalleryHtmlFromImageUrls(imageUrls, postId) {
+    const galleryImagesHtml = [];
+
+    for (let index = 0; index < imageUrls.length; index++) {
+        const imageUrl = imageUrls[index];
+        if (config.reddit.downloadImages) {
+            const imageName = `post_${postId}_gallery_${index}`;
+            const fileName = await downloadImage(imageUrl, imageName);
+            if (fileName) {
+                galleryImagesHtml[index] = `<img src="images/${fileName}" alt="Gallery image ${index + 1}" />`;
+            } else {
+                galleryImagesHtml[index] = `<p><em>[Gallery image ${index + 1} unavailable]</em></p>`;
+            }
+        } else {
+            galleryImagesHtml[index] = `<img src="${escapeXml(imageUrl)}" alt="Gallery image ${index + 1}" />`;
+        }
+    }
+
+    return `<div class="img-container">${galleryImagesHtml.join('')}</div>`;
+}
+
+function buildPostTextHtml(entry, postContent, rawData) {
+    if (entry.selftext_html && entry.selftext_html.trim()) {
+        return `<div class="post-text">${entry.selftext_html}</div>`;
+    }
+    if (entry.selftext && entry.selftext.trim()) {
+        return `<div class="post-text">${escapeXml(entry.selftext).replace(/\n\n/g, '</p><p>').replace(/\n/g, '<br />')}</div>`;
+    }
+    if (!rawData && postContent) {
+        const textMatch = postContent.match(/<div class="md">(.*?)<\/div>/s);
+        if (textMatch && textMatch[1] && textMatch[1].trim()) {
+            return `<div class="post-text">${textMatch[1]}</div>`;
+        }
+    }
+    return '';
+}
+
+async function sendLatestEpubToKindle() {
+    console.log('\n--- Sending generated EPUB to Kindle ---');
+    const senderPath = path.join(__dirname, 'send_epub_to_kindle.js');
+
+    await new Promise((resolve, reject) => {
+        const child = spawn(process.execPath, [senderPath], {
+            cwd: __dirname,
+            stdio: 'inherit',
+            env: process.env
+        });
+
+        child.on('error', reject);
+        child.on('close', code => {
+            if (code === 0) {
+                resolve();
+            } else {
+                reject(new Error(`Kindle sender exited with code ${code}`));
+            }
+        });
+    });
+}
+
 
 async function processSinglePost(entry, currentPostNum, totalPostsInSub, sourceSubredditName, resolvedConfig) {
     try {
@@ -2176,49 +2294,33 @@ async function processSinglePost(entry, currentPostNum, totalPostsInSub, sourceS
                 postContent = imageHtml + selftextHtml;
             } else if (isRedditGalleryUrl(externalUrl)) {
                 log('info', `Type: Reddit Gallery. Parsing: ${truncate(redditLink, 60)}`);
-                let galleryUrl = `${redditLink}.json`;
-                if (config.reddit.enableOAuth2 && redditAuth.isConfigured()) {
-                    galleryUrl = convertToOauthUrl(galleryUrl);
-                }
-                const galleryResponse = await makeRedditApiRequest(galleryUrl, { timeout: config.reddit.timeouts.galleryParsing });
-                const mediaMetadata = galleryResponse.data[0].data.children[0].data.media_metadata;
-                if (mediaMetadata) {
-                    const galleryImagesHtml = [];
-                    const imageItems = Object.values(mediaMetadata);
+                let galleryImageUrls = [];
 
-                    // Process gallery images sequentially (NO CONCURRENCY)
-                    for (let index = 0; index < imageItems.length; index++) {
-                        const item = imageItems[index];
-                        const highestRes = item.p[item.p.length - 1];
-                        const imageUrl = decode(highestRes.u);
-                        if (config.reddit.downloadImages) {
-                            const imageName = `post_${postId}_gallery_${index}`;
-                            const fileName = await downloadImage(imageUrl, imageName);
-                            if (fileName) {
-                                galleryImagesHtml[index] = `<img src="images/${fileName}" alt="Gallery image ${index + 1}" />`;
-                            }
-                        } else {
-                            galleryImagesHtml[index] = `<img src="${imageUrl}" alt="Gallery image ${index + 1}" />`;
-                        }
+                if (normalizeSourceMode(resolvedConfig.sourceMode) === 'html' && htmlDetails?.galleryImages?.length) {
+                    galleryImageUrls = htmlDetails.galleryImages;
+                    log('info', `Found ${galleryImageUrls.length} gallery images from old Reddit HTML.`);
+                } else {
+                    let galleryUrl = `${redditLink}.json`;
+                    if (config.reddit.enableOAuth2 && redditAuth.isConfigured()) {
+                        galleryUrl = convertToOauthUrl(galleryUrl);
                     }
-                    let galleryHtml = `<div class="img-container">${galleryImagesHtml.join('')}</div>`;
-
-                    // Add selftext if available
-                    let selftextHtml = '';
-                    if (entry.selftext_html && entry.selftext_html.trim()) {
-                        selftextHtml = `<div class="post-text">${entry.selftext_html}</div>`;
-                    } else if (entry.selftext && entry.selftext.trim()) {
-                        selftextHtml = `<div class="post-text">${escapeXml(entry.selftext).replace(/\n\n/g, '</p><p>').replace(/\n/g, '<br />')}</div>`;
-                    } else if (!rawData && postContent) {
-                        // For RSS feeds, extract text from the existing HTML content
-                        const textMatch = postContent.match(/<div class="md">(.*?)<\/div>/s);
-                        if (textMatch && textMatch[1] && textMatch[1].trim() && textMatch[1].trim() !== '') {
-                            selftextHtml = `<div class="post-text">${textMatch[1]}</div>`;
-                        }
+                    const galleryResponse = await makeRedditApiRequest(galleryUrl, { timeout: config.reddit.timeouts.galleryParsing });
+                    const mediaMetadata = galleryResponse.data[0].data.children[0].data.media_metadata;
+                    if (mediaMetadata) {
+                        galleryImageUrls = Object.values(mediaMetadata)
+                            .map(item => item?.p?.[item.p.length - 1]?.u || item?.s?.u || '')
+                            .filter(Boolean)
+                            .map(url => decodeHtml(url));
                     }
-
-                    postContent = galleryHtml + selftextHtml;
                 }
+
+                if (galleryImageUrls.length === 0) {
+                    stats.galleryParseFailures++;
+                    throw new Error('Could not find gallery images in old Reddit HTML or Reddit JSON');
+                }
+
+                const galleryHtml = await buildGalleryHtmlFromImageUrls(galleryImageUrls, postId);
+                postContent = galleryHtml + buildPostTextHtml(entry, postContent, rawData);
             } else {
                 log('info', `Type: Article Link. Parsing: ${truncate(externalUrl, 60)}`);
                 log('debug', `Starting Mercury parse for: ${externalUrl}`);
@@ -2341,7 +2443,7 @@ async function processSinglePost(entry, currentPostNum, totalPostsInSub, sourceS
         log('success', `Finished processing "${truncate(title, 60)}"`);
         return { title, link: redditLink, description: postContent, comments, subreddit, sourceSubreddit: sourceSubredditName, postIndex: -1, config: { ...resolvedConfig } };
     } catch (error) {
-        stats.mercuryFailures++; // Count any post failure as a mercury/parsing failure
+        stats.postProcessingFailures++;
         log('error', `Failed to process post "${truncate(entry.title?.[0] || 'Untitled', 50)}": ${error.message}`);
         return null; // Return null to indicate failure
     }
@@ -2916,6 +3018,8 @@ async function main() {
             stats.retriesPerformed,
             stats.imagesFailedToDownload,
             stats.mercuryFailures,
+            stats.postProcessingFailures,
+            stats.galleryParseFailures,
             stats.commentFetchFailures,
             stats.commentAuthFailures,
             stats.htmlBlockedRequests,
@@ -2932,6 +3036,8 @@ async function main() {
             if (stats.unfetchableArticlesSkipped > 0) log('summary', `  - Skipped ${stats.unfetchableArticlesSkipped} unfetchable articles.`);
             if (stats.internalLinksSkipped > 0) log('summary', `  - Skipped ${stats.internalLinksSkipped} internal Reddit links.`);
             if (stats.mercuryFailures > 0) log('summary', `  - Failed to parse ${stats.mercuryFailures} external articles.`);
+            if (stats.galleryParseFailures > 0) log('summary', `  - Failed to parse ${stats.galleryParseFailures} Reddit galleries.`);
+            if (stats.postProcessingFailures > 0) log('summary', `  - Failed to process ${stats.postProcessingFailures} posts.`);
             if (stats.imagesFailedToDownload > 0) log('summary', `  - Failed to download ${stats.imagesFailedToDownload} images.`);
             if (stats.largeImagesSkipped > 0) log('summary', `  - Skipped ${stats.largeImagesSkipped} images due to size limit.`);
             if (stats.imagesOptimized > 0) {
@@ -2953,6 +3059,10 @@ async function main() {
     } else {
         log('summary', `No valid posts were found to generate an EPUB.`);
     }
+
+    if (args.includes('--send')) {
+        await sendLatestEpubToKindle();
+    }
     console.log("\n");
 }
 
@@ -2971,6 +3081,7 @@ Usage:
   node index.js --help   Show this help message
 
 Options:
+  --send                 Send the generated EPUB to Kindle after generation
   --config               Display current configuration settings
   --stats                Show detailed statistics from last run
   --verbose, -v          Enable detailed verbose logging

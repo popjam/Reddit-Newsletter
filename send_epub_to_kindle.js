@@ -187,6 +187,7 @@ async function sendEpub() {
         console.log('   • Check your internet connection');
         console.log('   • Verify your GMX email credentials');  
         console.log('   • Try again in a few minutes (GMX may be temporarily blocking)');
+        process.exitCode = 1;
     }
 }
 
