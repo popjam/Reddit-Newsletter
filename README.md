@@ -116,6 +116,9 @@ If you prefer manual setup, you can edit `user-config.json` directly:
 # Generate and send newsletter
 npm start
 
+# Generate and send with another config file
+REDDIT_CONFIG=user-config.daily.json npm start
+
 # Reconfigure settings
 npm run setup
 
@@ -140,6 +143,17 @@ npm run help
 2. Add your email to approved senders: Amazon Account > Manage Your Content and Devices > Personal Document Settings
 
 ## Automation
+
+### Raycast Shortcuts (macOS)
+
+This repo includes Raycast script commands in `raycast/`:
+
+```bash
+raycast/reddit-kindle-weekly.sh
+raycast/reddit-kindle-daily.sh
+```
+
+The weekly shortcut uses `user-config.json`. The daily shortcut uses `user-config.daily.json`, which is ignored by git because it contains the same private email settings as your main config. Add the `raycast/` folder as a Raycast Script Commands directory, then run either command from Raycast.
 
 ### Cron Jobs (Linux/Mac)
 Set up automatic daily newsletters:
@@ -172,6 +186,7 @@ Configurations can be made in user-config.json. Subreddit configurations can be 
 - **includeInternalLinks:** Include/exclude self posts
 - **skipUnfetchableArticles:** If the articles text cannot be fetched, skip the post.
 - **commentStyle:** `threaded`, `nested`, or `html`. In HTML source mode, `threaded` automatically uses the new `html` view, which preserves old Reddit's visible comment order and indentation.
+- **showNestedCommentGuideLines:** Show repeated vertical guide lines for nested comment depth in `nested` and `html` comment views. Defaults to `true`.
 - **minCommentLength:** Will skip comments under this amount of characters. In threaded, only applies to top level comments.
 
 ### General Settings

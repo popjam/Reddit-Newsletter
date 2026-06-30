@@ -9,9 +9,15 @@ import { defaultConfig } from './config.js'; // Import the base default config
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
 // --- UNIFIED CONFIGURATION LOADER ---
+function getUserConfigPath() {
+    const configFile = process.env.REDDIT_CONFIG || 'user-config.json';
+    return path.isAbsolute(configFile) ? configFile : path.join(__dirname, configFile);
+}
+
 function loadConfig() {
     let finalConfig = JSON.parse(JSON.stringify(defaultConfig)); // Deep copy defaults
-    const userConfigPath = path.join(__dirname, 'user-config.json');
+    const userConfigPath = getUserConfigPath();
+    const userConfigName = path.basename(userConfigPath);
 
     if (fs.existsSync(userConfigPath)) {
         try {
@@ -29,12 +35,12 @@ function loadConfig() {
                 return target;
             };
             finalConfig = deepMerge(finalConfig, userConfig);
-            console.log('ℹ️  Loaded and merged email settings from user-config.json');
+            console.log(`ℹ️  Loaded and merged email settings from ${userConfigName}`);
         } catch (e) {
-            console.log(`⚠️  Could not parse user-config.json, using default email settings. Error: ${e.message}`);
+            console.log(`⚠️  Could not parse ${userConfigName}, using default email settings. Error: ${e.message}`);
         }
     } else {
-        console.log('⚠️  user-config.json not found. Cannot send email. Please run "npm run setup".');
+        console.log(`⚠️  ${userConfigName} not found. Cannot send email. Please run "npm run setup".`);
         return null; // Return null if config is missing
     }
     return finalConfig;
@@ -114,7 +120,7 @@ function getMostRecentEpubFile() {
 async function sendEpub() {
     // Check if config was loaded successfully
     if (!config) {
-        return; // Exit if user-config.json is missing
+        return; // Exit if the selected user config is missing
     }
 
     const { email: emailConfig } = config;

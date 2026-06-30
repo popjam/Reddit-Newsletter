@@ -19,9 +19,15 @@ import { JSDOM } from 'jsdom';
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
 // --- UNIFIED CONFIGURATION LOADER ---
+function getUserConfigPath() {
+    const configFile = process.env.REDDIT_CONFIG || 'user-config.json';
+    return path.isAbsolute(configFile) ? configFile : path.join(__dirname, configFile);
+}
+
 function loadConfig() {
     let finalConfig = JSON.parse(JSON.stringify(defaultConfig)); // Deep copy defaults
-    const userConfigPath = path.join(__dirname, 'user-config.json');
+    const userConfigPath = getUserConfigPath();
+    const userConfigName = path.basename(userConfigPath);
 
     if (fs.existsSync(userConfigPath)) {
         try {
@@ -39,12 +45,12 @@ function loadConfig() {
                 return target;
             };
             finalConfig = deepMerge(finalConfig, userConfig);
-            console.log('ℹ️  Loaded and merged settings from user-config.json');
+            console.log(`ℹ️  Loaded and merged settings from ${userConfigName}`);
         } catch (e) {
-            console.log(`⚠️  Could not parse user-config.json, using default settings. Error: ${e.message}`);
+            console.log(`⚠️  Could not parse ${userConfigName}, using default settings. Error: ${e.message}`);
         }
     } else {
-        console.log('ℹ️  user-config.json not found. Using default settings from config.js.');
+        console.log(`ℹ️  ${userConfigName} not found. Using default settings from config.js.`);
         console.log('⚠️  Please run "npm run setup" to configure your credentials and subreddits.');
     }
 
@@ -564,7 +570,7 @@ async function cleanContentForEpub(content, postId) {
 
     // Third pass: remove any remaining remote image references that might have been missed
     log('debug', `Removing remaining remote images for post ${postId}`);
-    cleaned = cleaned.replace(/<img[^>]+src="https?:\/\/[^"]*"[^>]*>/gi, '<p><em>[External image removed for EPUB compatibility]</em></p>');
+    cleaned = cleaned.replace(/<img[^>]+src="https?:\/\/[^"]*"[^>]*>/gi, '');
 
     // Final pass: ensure no empty or malformed elements remain
     log('debug', `Final cleanup for post ${postId}`);
@@ -989,9 +995,7 @@ function parseOldRedditListing(html, resolvedConfig) {
         const postHint = isGallery ? 'gallery' : isImageUrl(dataUrl) || dataUrl.includes('i.redd.it') ? 'image' : '';
         const externalUrl = isSelf ? permalink : dataUrl;
 
-        const descriptionParts = [
-            `<p><a href="${escapeXml(externalUrl)}">[link]</a> <a href="${escapeXml(permalink)}">[comments]</a></p>`
-        ];
+        const descriptionParts = [];
         if (previewImage && isImageUrl(previewImage)) {
             descriptionParts.push(`<a href="${escapeXml(previewImage)}"><img src="${escapeXml(previewImage)}" alt="${escapeXml(title)}" /></a>`);
         }
@@ -1128,8 +1132,8 @@ function parseOldRedditComments(html) {
 function normalizePreviewImageUrl(url) {
     if (!url) return '';
     const decodedUrl = decodeHtml(url);
-    if (decodedUrl.startsWith('//')) return `https:${decodedUrl}`;
-    return decodedUrl;
+    const absoluteUrl = decodedUrl.startsWith('//') ? `https:${decodedUrl}` : decodedUrl;
+    return absoluteUrl.replace(/&amp;/g, '&');
 }
 
 function extractOldRedditGalleryImages(postHtml) {
@@ -1144,11 +1148,36 @@ function extractOldRedditGalleryImages(postHtml) {
         images.push(normalizedUrl);
     };
 
-    const cachedHtmlMatches = [...postHtml.matchAll(/data-cachedhtml="([\s\S]*?)"\s+data-pin-condition=/gi)];
+    const cachedHtmlMatches = [...postHtml.matchAll(/\sdata-cachedhtml="([\s\S]*?)"/gi)];
     for (const match of cachedHtmlMatches) {
         const cachedHtml = decodeHtml(match[1]);
         let foundFullSizeLinks = false;
-        const hrefMatches = cachedHtml.matchAll(/<a[^>]+class="[^"]*\bgallery-item-thumbnail-link\b[^"]*"[^>]+href="([^"]+)"/gi);
+
+        try {
+            const fragment = new JSDOM(`<div>${cachedHtml}</div>`).window.document;
+            const linkNodes = [
+                ...fragment.querySelectorAll('a.gallery-item-thumbnail-link[href], a[href*="preview.redd.it"], a[href*="i.redd.it"]')
+            ];
+            for (const linkNode of linkNodes) {
+                addImage(linkNode.getAttribute('href'));
+                foundFullSizeLinks = true;
+            }
+
+            if (foundFullSizeLinks) continue;
+
+            const imageNodes = [
+                ...fragment.querySelectorAll('img.preview[src], img[src*="preview.redd.it"], img[src*="i.redd.it"]')
+            ];
+            for (const imageNode of imageNodes) {
+                addImage(imageNode.getAttribute('src'));
+            }
+        } catch (error) {
+            log('debug', `Could not parse gallery cached HTML with DOM: ${error.message}`);
+        }
+
+        if (foundFullSizeLinks) continue;
+
+        const hrefMatches = cachedHtml.matchAll(/<a[^>]+href="([^"]*(?:preview|i)\.redd\.it[^"]*)"[^>]*>/gi);
         for (const hrefMatch of hrefMatches) {
             addImage(hrefMatch[1]);
             foundFullSizeLinks = true;
@@ -1156,7 +1185,7 @@ function extractOldRedditGalleryImages(postHtml) {
 
         if (foundFullSizeLinks) continue;
 
-        const previewMatches = cachedHtml.matchAll(/<img[^>]+class="[^"]*\bpreview\b[^"]*"[^>]+src="([^"]+)"/gi);
+        const previewMatches = cachedHtml.matchAll(/<img[^>]+src="([^"]*(?:preview|i)\.redd\.it[^"]*)"[^>]*>/gi);
         for (const previewMatch of previewMatches) {
             addImage(previewMatch[1]);
         }
@@ -1208,7 +1237,7 @@ function isImageUrl(url) {
     if (!url) return false;
 
     // Always consider i.redd.it URLs as images (Reddit's image hosting)
-    if (url.includes('i.redd.it')) {
+    if (url.includes('i.redd.it') || url.includes('preview.redd.it')) {
         return true;
     }
 
@@ -1438,9 +1467,42 @@ async function downloadImage(imageUrl, imageName) {
     }
 }
 
+function getGalleryImageDownloadCandidates(imageUrl) {
+    const normalizedUrl = normalizePreviewImageUrl(imageUrl);
+    if (!normalizedUrl) return [];
+
+    const candidates = [normalizedUrl];
+    try {
+        const parsedUrl = new URL(normalizedUrl);
+        if (parsedUrl.hostname === 'preview.redd.it') {
+            if (!/\.(jpg|jpeg|png|gif|webp|heif)$/i.test(parsedUrl.pathname)) {
+                const withJpgPath = new URL(parsedUrl.toString());
+                withJpgPath.pathname = `${withJpgPath.pathname}.jpg`;
+                candidates.push(withJpgPath.toString());
+            }
+
+            if (parsedUrl.searchParams.has('format') || parsedUrl.searchParams.has('auto')) {
+                const jpgFormatUrl = new URL(parsedUrl.toString());
+                jpgFormatUrl.searchParams.set('format', 'jpg');
+                jpgFormatUrl.searchParams.delete('auto');
+                candidates.push(jpgFormatUrl.toString());
+            }
+        }
+    } catch (error) {
+        log('debug', `Could not build gallery image URL candidates for ${truncate(normalizedUrl, 60)}: ${error.message}`);
+    }
+
+    return [...new Set(candidates)];
+}
+
 async function fetchSubredditInfo(subredditName) {
     try {
         log('info', `Fetching info for r/${subredditName}`);
+
+        if (normalizeSourceMode(config.reddit.sourceMode) === 'html' && !isOAuthReady()) {
+            log('info', `Skipping subreddit about.json for r/${subredditName} in unauthenticated HTML mode to avoid Reddit JSON 403s.`);
+            return { iconUrl: null, description: null };
+        }
 
         // Try OAuth first, then fall back to JSON API
         let response = null;
@@ -1478,7 +1540,7 @@ async function processImagesInContent(content, postIndex) {
     if (!config.reddit.downloadImages) {
         // If image downloads are disabled, remove all remote image references
         log('debug', `Image downloads disabled, removing remote images`);
-        return content.replace(/<img[^>]+src="https?:\/\/[^"]*"[^>]*>/gi, '<p><em>[Image downloads disabled]</em></p>');
+        return content.replace(/<img[^>]+src="https?:\/\/[^"]*"[^>]*>/gi, '');
     }
 
     const imageRegex = /<img[^>]+src="([^"]+)"[^>]*>/gi;
@@ -1529,12 +1591,12 @@ async function processImagesInContent(content, postIndex) {
             content = content.replace(result.original, `<img src="images/${result.fileName}" alt="Image from article" />`);
         } else {
             // Replace failed downloads with placeholder text instead of broken image tags
-            content = content.replace(result.original, `<p><em>[Image unavailable: ${truncate(result.url, 60)}]</em></p>`);
+            content = content.replace(result.original, '');
         }
     }
 
     // Final safety check - remove any remaining remote image references
-    content = content.replace(/<img[^>]+src="https?:\/\/[^"]*"[^>]*>/gi, '<p><em>[External image removed]</em></p>');
+    content = content.replace(/<img[^>]+src="https?:\/\/[^"]*"[^>]*>/gi, '');
 
     log('debug', `Completed processing images in content for post ${postIndex}`);
     return content;
@@ -1740,13 +1802,13 @@ async function fetchComments(postUrl, maxComments, resolvedConfig, attempt = 1) 
 
 function generateNestedCommentsHtml(comments, postConfig, depth = 0) {
     if (!comments || comments.length === 0) return '';
-    const style = depth > 0 ? `margin-left: 10px; padding-left: 10px; border-left: 1px solid #000;` : '';
+    const guideStyle = getCommentDepthGuideStyle(depth, postConfig);
     return comments.map(comment => {
         if (!comment.author || !comment.text || comment.author === '[deleted]') return '';
         const sanitizedText = sanitizeHtmlForEpub(comment.text);
         if (postConfig.effectiveMinLength > 0 && sanitizedText.length < postConfig.effectiveMinLength) return '';
         const repliesHtml = generateNestedCommentsHtml(comment.replies, postConfig, depth + 1);
-        return `<div style="${style} margin-top: 1em;">
+        return `<div class="nested-comment" style="margin-top: 1em; ${guideStyle}">
             <p style="margin: 0; font-size: 0.9em;"><strong>${escapeXml(comment.author)}</strong></p>
             <div style="margin: 0;">${sanitizedText}</div>
             ${repliesHtml}
@@ -1768,6 +1830,18 @@ function countCommentsRecursive(comments) {
     return comments.reduce((count, comment) => count + 1 + countCommentsRecursive(comment.replies || []), 0);
 }
 
+function getCommentDepthGuideStyle(depth, postConfig) {
+    if (postConfig.showNestedCommentGuideLines === false || depth <= 0) return '';
+    const lineSpacing = 10;
+    const gutterWidth = Math.min(depth, postConfig.maxCommentDepth || 10) * lineSpacing;
+    return [
+        `padding-left: ${gutterWidth + 8}px`,
+        'background-image: repeating-linear-gradient(to right, #999 0, #999 1px, transparent 1px, transparent 10px)',
+        'background-repeat: no-repeat',
+        `background-size: ${gutterWidth}px 100%`
+    ].join('; ') + ';';
+}
+
 function generateHtmlVisibleCommentsHtml(comments, postConfig) {
     if (!comments || comments.length === 0) return '';
     const visibleComments = flattenCommentsVisibleOrder(comments, postConfig.maxCommentDepth || 10)
@@ -1780,9 +1854,8 @@ function generateHtmlVisibleCommentsHtml(comments, postConfig) {
         if (postConfig.effectiveMinLength > 0 && sanitizedText.length < postConfig.effectiveMinLength) continue;
 
         const depth = Math.min(comment.htmlDepth || 0, postConfig.maxCommentDepth || 10);
-        const indent = depth > 0 ? Math.min(depth * 10, 50) : 0;
-        const border = depth > 0 ? 'border-left: 1px solid #999; padding-left: 8px;' : '';
-        renderedComments.push(`<div class="html-comment" style="margin-top: 1em; margin-left: ${indent}px; ${border}">
+        const guideStyle = getCommentDepthGuideStyle(depth, postConfig);
+        renderedComments.push(`<div class="html-comment" style="margin-top: 1em; ${guideStyle}">
             <p style="margin: 0; font-size: 0.9em;"><strong>${escapeXml(comment.author)}</strong></p>
             <div style="margin: 0;">${sanitizedText}</div>
         </div>`);
@@ -1900,6 +1973,15 @@ function extractSubreddit(link) {
     return match ? match[1].toLowerCase() : 'Unknown Subreddit';
 }
 
+function getDisplayDomain(url) {
+    if (!url) return '';
+    try {
+        return new URL(url).hostname.replace(/^www\./, '');
+    } catch (e) {
+        return '';
+    }
+}
+
 async function createEpub(subredditsWithPosts) {
     // Generate dated cover if enabled
     await generateDatedCover(config, VERBOSE_LOGGING);
@@ -2001,14 +2083,14 @@ ${manifestImageItems}
 </package>`);
 
     oebps.file('styles.css', `
-body { font-family: Georgia, serif; line-height: 1.5; margin: 1em; }
-.nav-bar-top, .nav-bar-bottom { padding: 0.5em 0; font-family: monospace; font-size: 0.8em; text-align: center; border-top: 1px solid #000; border-bottom: 1px solid #000; margin: 1em 0; }
+body { font-family: Georgia, serif; line-height: 1.45; margin: 1em; color: #111; }
+.nav-bar-top, .nav-bar-bottom { padding: 0.35em 0; font-family: monospace; font-size: 0.8em; text-align: center; border-bottom: 1px solid #999; margin: 0 0 1em 0; }
 h1, h2, h3, h4 { margin: 1.5em 0 0.5em 0; } h1 { font-size: 1.5em; font-weight: bold; overflow-wrap: anywhere; }
-h2 { font-size: 1.8em; text-align: center; } h3 { font-size: 1.2em; } h4 { font-weight: bold; }
+h2 { font-size: 1.6em; text-align: center; } h3 { font-size: 1.1em; } h4 { font-weight: bold; color: #555; }
 img { display: block; margin: 1em auto; max-width: 100%; height: auto; } .img-container { text-align: center; margin: 1em 0; }
-.comments { margin-top: 2em; border-top: 2px solid #000; padding-top: 1em; } .comment-thread { border-bottom: 1px solid #888; padding-bottom: 1em; margin-bottom: 1em; }
+.comments { margin-top: 2em; border-top: 1px solid #999; padding-top: 0.7em; } .comment-thread { border-bottom: 1px solid #ddd; padding-bottom: 0.8em; margin-bottom: 0.8em; }
 .comment-thread:last-child { border-bottom: none; margin-bottom: 0; } .subreddit { font-size: 0.9em; font-style: italic; }
-.subreddit-title-page { text-align: center; padding: 15% 0; page-break-inside: avoid; }
+.subreddit-title-page { text-align: center; padding: 10% 0; page-break-inside: avoid; }
 .subreddit-sorting { font-size: 0.9em; color: #666; font-weight: normal; margin-top: 0.5em; font-style: italic; }
 .subreddit-logo { width: 100px; height: 100px; border: 1px solid #000; margin: 0 auto 1em auto; }
 .subreddit-description { font-style: italic; max-width: 80%; margin: 0 auto; }
@@ -2022,8 +2104,9 @@ img { display: block; margin: 1em auto; max-width: 100%; height: auto; } .img-co
 .post-count { font-size: 0.85em; color: #666; font-style: italic; font-weight: normal; }
 .sort-indicator { font-size: 0.85em; color: #888; font-style: italic; font-weight: normal; }
 .subreddit-posts-link { text-align: center; margin: 1.5em 0; }
-.subreddit-posts-link a { display: inline-block; padding: 0.5em 1em; background-color: #f0f0f0; border: 1px solid #ccc; text-decoration: none; color: #000; border-radius: 3px; }
-.post-text { margin: 1em 0; padding: 1em; border-left: 3px solid #ddd; background-color: #f9f9f9; }
+.subreddit-posts-link a { text-decoration: none; color: #000; }
+.post-text { margin: 1em 0; padding-left: 0.8em; border-left: 2px solid #ddd; }
+.source-line { color: #666; font-size: 0.9em; font-style: italic; }
 `);
     const tocEntries = subredditsWithPosts.map(subreddit => {
         if (subreddit.posts.length === 0) return '';
@@ -2131,10 +2214,6 @@ ${navPoints}
         const nextPage = i < flatPageList.length - 1 ? flatPageList[i + 1] : null;
         const currentSubIndex = page.subredditIndex;
         const navParts = [];
-        if (currentSubIndex > 0) {
-            const prevSubreddit = orderedSubreddits[currentSubIndex - 1];
-            navParts.push(`<a href="${subIntroHrefs[currentSubIndex - 1]}">&lt;&lt; r/${prevSubreddit.name}</a>`);
-        }
         if (prevPage) { navParts.push(`<a href="${prevPage.href}">&lt; Prev</a>`); }
         const currentSubreddit = orderedSubreddits[currentSubIndex];
         let homeLink;
@@ -2151,10 +2230,6 @@ ${navPoints}
             navParts.push(`<a href="${menuHref}">Menu</a>`);
         }
         if (nextPage) { navParts.push(`<a href="${nextPage.href}">Next &gt;</a>`); }
-        if (currentSubIndex > -1 && currentSubIndex < orderedSubreddits.length - 1) {
-            const nextSubreddit = orderedSubreddits[currentSubIndex + 1];
-            navParts.push(`<a href="${subIntroHrefs[currentSubIndex + 1]}">r/${nextSubreddit.name} &gt;&gt;</a>`);
-        }
         const navLinks = navParts.join(' | ');
         let pageContent = '';
         if (page.type === 'intro') {
@@ -2227,18 +2302,28 @@ async function buildGalleryHtmlFromImageUrls(imageUrls, postId) {
         const imageUrl = imageUrls[index];
         if (config.reddit.downloadImages) {
             const imageName = `post_${postId}_gallery_${index}`;
-            const fileName = await downloadImage(imageUrl, imageName);
+            const candidates = getGalleryImageDownloadCandidates(imageUrl);
+            let fileName = null;
+            for (let candidateIndex = 0; candidateIndex < candidates.length && !fileName; candidateIndex++) {
+                const candidate = candidates[candidateIndex];
+                fileName = await downloadImage(candidate, imageName);
+                if (!fileName && candidateIndex < candidates.length - 1) {
+                    log('warn', `Gallery image ${index + 1} failed with one URL, trying alternate URL.`);
+                }
+            }
             if (fileName) {
                 galleryImagesHtml[index] = `<img src="images/${fileName}" alt="Gallery image ${index + 1}" />`;
             } else {
-                galleryImagesHtml[index] = `<p><em>[Gallery image ${index + 1} unavailable]</em></p>`;
+                log('warn', `Gallery image ${index + 1} unavailable after ${candidates.length} URL attempt(s): ${truncate(imageUrl, 80)}`);
+                galleryImagesHtml[index] = '';
             }
         } else {
             galleryImagesHtml[index] = `<img src="${escapeXml(imageUrl)}" alt="Gallery image ${index + 1}" />`;
         }
     }
 
-    return `<div class="img-container">${galleryImagesHtml.join('')}</div>`;
+    const renderedImages = galleryImagesHtml.filter(Boolean).join('');
+    return renderedImages ? `<div class="img-container">${renderedImages}</div>` : '';
 }
 
 function buildPostTextHtml(entry, postContent, rawData) {
@@ -2430,8 +2515,7 @@ async function processSinglePost(entry, currentPostNum, totalPostsInSub, sourceS
                     // Clean the article content using our new function
                     let cleanedArticleContent = await cleanContentForEpub(article.content, postId);
 
-                    const sourceInfo = `Source: ${escapeXml(article.domain)}${article.author ? ` | By ${escapeXml(article.author)}` : ''}`;
-                    const linkLabel = redditLink.includes('reddit.com/r/') ? 'Original Post' : 'Original Article';
+                    const sourceInfo = `${escapeXml(article.domain)}${article.author ? ` | By ${escapeXml(article.author)}` : ''}`;
                     // Use full cleaned article content with preserved paragraph formatting
                     const formattedContent = cleanedArticleContent
                         // Convert paragraph tags to line breaks
@@ -2451,7 +2535,7 @@ async function processSinglePost(entry, currentPostNum, totalPostsInSub, sourceS
                     const paragraphs = formattedContent.split('\n\n').filter(p => p.trim().length > 0);
                     const htmlContent = paragraphs.map(p => `<p>${escapeXml(p.trim())}</p>`).join('');
 
-                    postContent = `<h2>${escapeXml(article.title)}</h2><h4>${sourceInfo}</h4><p><em>${linkLabel}: <a href="${escapeXml(article.url)}">${escapeXml(article.url)}</a></em></p>${leadImageHtml}${htmlContent}`;
+                    postContent = `<h2>${escapeXml(article.title)}</h2><p class="source-line">${sourceInfo}</p>${leadImageHtml}${htmlContent}`;
                 } else {
                     log('warn', `Mercury found no content for: "${truncate(title, 60)}"`);
                     stats.mercuryFailures++;
@@ -2473,7 +2557,8 @@ async function processSinglePost(entry, currentPostNum, totalPostsInSub, sourceS
                         }
                     }
 
-                    postContent = `<p>Could not parse article from: <a href="${externalUrl}">${escapeXml(externalUrl)}</a></p>${fallbackImageHtml}`;
+                    const fallbackDomain = getDisplayDomain(externalUrl);
+                    postContent = `<p><em>Could not extract article text${fallbackDomain ? ` from ${escapeXml(fallbackDomain)}` : ''}.</em></p>${fallbackImageHtml}`;
                 }
             }
         } else {
@@ -2510,9 +2595,6 @@ async function processSinglePost(entry, currentPostNum, totalPostsInSub, sourceS
                 postContent = imageHtml || '<p><em>This post has no text content.</em></p>';
             }
         }
-
-        // Add Reddit discussion link at the end of each post
-        postContent += `<hr /><p><strong>Discussion on Reddit:</strong> <a href="${redditLink}">${redditLink}</a></p>`;
 
         log('debug', `Starting comment fetch for: ${truncate(title, 60)}`);
         currentProgressContext = {

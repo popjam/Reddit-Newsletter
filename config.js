@@ -84,6 +84,7 @@ export const defaultConfig = {
             // Comment display: 'threaded', 'nested', or 'html'.
             // HTML source mode automatically uses 'html' unless overridden away from threaded.
             commentStyle: 'threaded',
+            showNestedCommentGuideLines: true,
             maxCommentDepth: 3,
             minCommentLength: 0,
             sort: 'top',

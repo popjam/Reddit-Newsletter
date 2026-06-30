@@ -11,6 +11,7 @@ yarn-error.log*
 
 # User configuration with sensitive data
 user-config.json
+user-config.*.json
 
 # Runtime statistics file
 .reddit-stats.json
