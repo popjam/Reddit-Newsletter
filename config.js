@@ -53,6 +53,13 @@ export const defaultConfig = {
             password: 'YOUR_REDDIT_PASSWORD',
         },
 
+        // Optional signed-in Reddit cookie for HTML scraping.
+        // Prefer REDDIT_COOKIE or an ignored .reddit-cookie file instead of committing this.
+        htmlAuth: {
+            enabled: true,
+            cookie: '',
+        },
+
         // Image handling settings
         downloadImages: true,
 
@@ -111,6 +118,7 @@ export const defaultConfig = {
         requestDelays: {
             oauth2: { betweenSubreddits: 1000, betweenComments: 1000, betweenImages: 500, betweenApiCalls: 1000, after429Error: 5000 },
             unauthenticated: { betweenSubreddits: 6000, betweenComments: 6000, betweenImages: 500, betweenApiCalls: 6000, after429Error: 10000 },
+            rss: { betweenSubreddits: 0, betweenComments: 0, betweenImages: 500, betweenApiCalls: 60000, after429Error: 60000 },
             html: { betweenRequests: 3000, afterBlocked: 60000 }
         },
         timeouts: { redditApi: 20000, imageDownload: 30000, mercuryParsing: 15000, galleryParsing: 20000 },

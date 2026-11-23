@@ -116,6 +116,9 @@ function addJitter(delay, jitterPercent = config.reddit.retries.jitterPercent) {
 
 // Get appropriate request delays based on OAuth2 authentication status
 function getRequestDelays() {
+    if (normalizeSourceMode(config.reddit.sourceMode) === 'rss' && config.reddit.requestDelays.rss) {
+        return config.reddit.requestDelays.rss;
+    }
     // MODIFIED: Check if OAuth is blocked, not just enabled/configured
     const isOAuth2Active = isOAuthReady();
     return isOAuth2Active ? config.reddit.requestDelays.oauth2 : config.reddit.requestDelays.unauthenticated;
@@ -123,6 +126,15 @@ function getRequestDelays() {
 
 function isOAuthReady() {
     return config.reddit.enableOAuth2 && redditAuth.isConfigured() && !redditAuth.oauthBlocked;
+}
+
+function getSubredditFromRedditUrl(url) {
+    try {
+        const match = new URL(url).pathname.match(/\/r\/([^/]+)/i);
+        return match ? decodeURIComponent(match[1]) : '';
+    } catch (error) {
+        return '';
+    }
 }
 
 // Calculate exponential backoff delay
@@ -205,8 +217,11 @@ async function withRetry(operation, context = 'operation', maxAttempts = Math.mi
 
                 // Set the GLOBAL throttle timestamp
                 throttleUntil = now + finalWaitTime;
-                delay = calculateBackoffDelay(attempt); // Use shorter delay for the retry itself
-                log('warn', `Pausing future requests until throttle lifts. Retrying this request in ${delay}ms.`);
+                delay = finalWaitTime;
+                const retrySeconds = Math.round(delay / 1000);
+                log('warn', `Pausing future requests until throttle lifts. Retrying this request in ${retrySeconds}s.`);
+                const progressSubreddit = getSubredditFromRedditUrl(context) || currentProgressContext.subreddit || 'all';
+                await updateProgress(progressSubreddit, 'rate_limited', `⏳ Rate limited, retrying in ${retrySeconds}s...`);
 
             } else {
                 delay = calculateBackoffDelay(attempt);
@@ -240,7 +255,14 @@ async function makeRedditApiRequest(url, options = {}) {
             await sleep(waitTime);
         }
 
-        await sleep(getRequestDelays().betweenApiCalls);
+        const requestDelay = getRequestDelays().betweenApiCalls;
+        if (requestDelay > 0) {
+            const delaySeconds = Math.round(requestDelay / 1000);
+            const progressSubreddit = getSubredditFromRedditUrl(url) || currentProgressContext.subreddit || 'all';
+            const mode = normalizeSourceMode(config.reddit.sourceMode).toUpperCase();
+            await updateProgress(progressSubreddit, 'waiting', `⏳ ${mode} pacing wait ${delaySeconds}s...`);
+            await sleep(requestDelay);
+        }
 
         // Check if OAuth is blocked
         const useOAuth = isOAuthReady();
@@ -559,6 +581,7 @@ async function cleanContentForEpub(content, postId) {
     // First pass: sanitize the HTML structure
     log('debug', `Starting sanitizeHtmlForEpub for post ${postId}`);
     let cleaned = sanitizeHtmlForEpub(content);
+    cleaned = cleaned.replace(/<\/?(?:shreddit|faceplate|rpl|pdp)-[a-z0-9-]+[^>]*>/gi, '');
     log('debug', `Completed sanitizeHtmlForEpub for post ${postId}`);
 
     // Second pass: process any remaining images if downloads are enabled
@@ -889,6 +912,31 @@ function normalizeRedditPermalink(permalink) {
     }
 }
 
+function getRedditHtmlCookie() {
+    const configuredCookie = process.env.REDDIT_COOKIE || config.reddit.htmlAuth?.cookie || '';
+    if (configuredCookie.trim()) return configuredCookie.trim().replace(/^Cookie:\s*/i, '');
+
+    const cookiePath = path.join(__dirname, '.reddit-cookie');
+    if (fs.existsSync(cookiePath)) {
+        return fs.readFileSync(cookiePath, 'utf8').trim().replace(/^Cookie:\s*/i, '');
+    }
+
+    return '';
+}
+
+function looksLikeModernRedditShell(html) {
+    if (!html) return false;
+    return /<title>\s*Welcome to Reddit\s*<\/title>/i.test(html) ||
+        html.includes('<shreddit-app') ||
+        html.includes('<shreddit-post');
+}
+
+function containsRedditShellMarkup(html = '') {
+    return /<\/?(?:shreddit|faceplate|rpl|pdp)-[a-z0-9-]+/i.test(html) ||
+        html.includes('faceplate-loader') ||
+        html.includes('shreddit-post');
+}
+
 async function fetchOldRedditHtml(url, timeoutMs = config.reddit.timeouts.redditApi, progressContext = {}) {
     const oldRedditUrl = ensureOldRedditUrl(url);
     const htmlDelays = config.reddit.requestDelays.html || {};
@@ -907,14 +955,27 @@ async function fetchOldRedditHtml(url, timeoutMs = config.reddit.timeouts.reddit
             }
 
             stats.htmlRequests++;
+            const cookie = getRedditHtmlCookie();
+            const headers = {
+                'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36',
+                'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+                'Accept-Language': 'en-US,en;q=0.9'
+            };
+            if (cookie && config.reddit.htmlAuth?.enabled !== false) {
+                headers.Cookie = cookie;
+            }
+
             const response = await axios.get(oldRedditUrl, {
                 timeout: timeoutMs,
-                headers: {
-                    'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36',
-                    'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
-                    'Accept-Language': 'en-US,en;q=0.9'
-                }
+                headers
             });
+
+            if (looksLikeModernRedditShell(response.data)) {
+                const reason = cookie
+                    ? 'old Reddit returned the modern Reddit shell even with a cookie; the session may be expired or Reddit may be forcing the redesign for this request'
+                    : 'old Reddit returned the modern Reddit shell; set REDDIT_COOKIE or .reddit-cookie to use signed-in old Reddit HTML';
+                throw new Error(reason);
+            }
 
             return response.data;
         } catch (error) {
@@ -980,6 +1041,11 @@ function parseOldRedditListing(html, resolvedConfig) {
         const numComments = getHtmlAttr(tag, 'data-comments-count') || '0';
         const subreddit = getHtmlAttr(tag, 'data-subreddit') || resolvedConfig.name;
         const isGallery = getHtmlAttr(tag, 'data-is-gallery') === 'true' || dataUrl.includes('/gallery/');
+        const isVideo = domain === 'v.redd.it' ||
+            dataUrl.includes('v.redd.it') ||
+            dataUrl.includes('/video/') ||
+            /\bv_redd_it\b/.test(className) ||
+            /\bvideo\b/i.test(className);
         const isPromoted = getHtmlAttr(tag, 'data-promoted') === 'true';
         const isStickied = className.includes('stickied');
 
@@ -992,7 +1058,7 @@ function parseOldRedditListing(html, resolvedConfig) {
         const imagePreviewMatch = segment.match(/<a[^>]+class="[^"]*\bthumbnail\b[^"]*"[^>]*>[\s\S]*?<img[^>]+src="([^"]+)"/i);
         const previewImage = imagePreviewMatch ? decodeHtml(imagePreviewMatch[1]) : '';
         const isSelf = domain === 'self' || domain === `self.${subreddit}` || dataUrl === rawPermalink || dataUrl === permalink;
-        const postHint = isGallery ? 'gallery' : isImageUrl(dataUrl) || dataUrl.includes('i.redd.it') ? 'image' : '';
+        const postHint = isVideo ? 'hosted:video' : isGallery ? 'gallery' : isImageUrl(dataUrl) || dataUrl.includes('i.redd.it') ? 'image' : '';
         const externalUrl = isSelf ? permalink : dataUrl;
 
         const descriptionParts = [];
@@ -1028,7 +1094,8 @@ function parseOldRedditListing(html, resolvedConfig) {
                 num_comments: Number.parseInt(numComments, 10) || 0,
                 domain,
                 post_hint: postHint,
-                is_gallery: isGallery
+                is_gallery: isGallery,
+                is_video: isVideo
             }
         });
     }
@@ -1329,11 +1396,21 @@ function isInternalRedditLink(url) {
     return internalPatterns.some(pattern => url.includes(pattern));
 }
 
-function isUnsupportedVideo(content, externalUrl) {
+function isUnsupportedVideo(content, externalUrl, rawData = null) {
+    if (rawData) {
+        if (rawData.is_video === true) return true;
+        if (rawData.post_hint === 'hosted:video' || rawData.post_hint === 'rich:video') return true;
+        if (rawData.domain === 'v.redd.it') return true;
+        if (rawData.url && /(?:^|\/\/)v\.redd\.it\//i.test(rawData.url)) return true;
+        if (rawData.secure_media?.reddit_video || rawData.media?.reddit_video) return true;
+    }
+
     // Check content for video indicators
     if (content && (
         content.includes('v.redd.it') ||
         content.includes('reddit.com/video/') ||
+        content.includes('<shreddit-post') ||
+        content.includes('<video') ||
         content.includes('[link] [comments]') && content.includes('v.redd.it')
     )) {
         return true;
@@ -1603,17 +1680,19 @@ async function processImagesInContent(content, postIndex) {
 }
 
 async function fetchRssFeed(rssUrl, isJsonMode = false) {
-    try {
-        const response = await makeRedditApiRequest(rssUrl);
-        if (isJsonMode) {
-            return convertJsonToRssFormat(response.data);
-        } else {
-            return await parseStringPromise(response.data);
-        }
-    } catch (error) {
-        log('error', `Error fetching RSS feed from ${rssUrl}: ${error.message}`);
-        return null;
+    const options = isJsonMode
+        ? {}
+        : {
+            headers: {
+                'User-Agent': 'RedditToKindle/2.0.0 by popjam',
+                'Accept': 'application/atom+xml, application/rss+xml, application/xml, text/xml, */*'
+            }
+        };
+    const response = await makeRedditApiRequest(rssUrl, options);
+    if (isJsonMode) {
+        return convertJsonToRssFormat(response.data);
     }
+    return await parseStringPromise(response.data);
 }
 
 function convertJsonToRssFormat(jsonData) {
@@ -1800,20 +1879,37 @@ async function fetchComments(postUrl, maxComments, resolvedConfig, attempt = 1) 
     }
 }
 
-function generateNestedCommentsHtml(comments, postConfig, depth = 0) {
-    if (!comments || comments.length === 0) return '';
+function joinCommentThreads(threadHtml) {
+    return threadHtml.filter(html => html.length > 0).join('<hr class="comment-separator" />');
+}
+
+function generateNestedCommentHtml(comment, postConfig, depth = 0) {
+    if (!comment.author || !comment.text || comment.author === '[deleted]') return '';
+    if (postConfig.skipAutoModerator && comment.author === 'AutoModerator') return '';
+    const sanitizedText = sanitizeHtmlForEpub(comment.text);
+    if (postConfig.effectiveMinLength > 0 && sanitizedText.length < postConfig.effectiveMinLength) return '';
     const guideStyle = getCommentDepthGuideStyle(depth, postConfig);
-    return comments.map(comment => {
-        if (!comment.author || !comment.text || comment.author === '[deleted]') return '';
-        const sanitizedText = sanitizeHtmlForEpub(comment.text);
-        if (postConfig.effectiveMinLength > 0 && sanitizedText.length < postConfig.effectiveMinLength) return '';
-        const repliesHtml = generateNestedCommentsHtml(comment.replies, postConfig, depth + 1);
-        return `<div class="nested-comment" style="margin-top: 1em; ${guideStyle}">
-            <p style="margin: 0; font-size: 0.9em;"><strong>${escapeXml(comment.author)}</strong></p>
-            <div style="margin: 0;">${sanitizedText}</div>
-            ${repliesHtml}
-        </div>`;
-    }).filter(html => html.length > 0).join('');
+    const repliesHtml = (comment.replies || [])
+        .map(reply => generateNestedCommentHtml(reply, postConfig, depth + 1))
+        .filter(html => html.length > 0)
+        .join('');
+    return `<div class="nested-comment" style="margin-top: 1em; ${guideStyle}">
+        <p style="margin: 0; font-size: 0.9em;"><strong>${escapeXml(comment.author)}</strong></p>
+        <div style="margin: 0;">${sanitizedText}</div>
+        ${repliesHtml}
+    </div>`;
+}
+
+function generateNestedCommentsHtml(comments, postConfig) {
+    if (!comments || comments.length === 0) return '';
+    const threadHtml = [];
+    for (const comment of comments) {
+        const html = generateNestedCommentHtml(comment, postConfig, 0);
+        if (!html) continue;
+        threadHtml.push(`<div class="comment-thread">${html}</div>`);
+        if (threadHtml.length >= postConfig.commentsPerPost) break;
+    }
+    return joinCommentThreads(threadHtml);
 }
 
 function flattenCommentsVisibleOrder(comments, maxDepth = 10, depth = 0, output = []) {
@@ -1844,31 +1940,45 @@ function getCommentDepthGuideStyle(depth, postConfig) {
 
 function generateHtmlVisibleCommentsHtml(comments, postConfig) {
     if (!comments || comments.length === 0) return '';
-    const visibleComments = flattenCommentsVisibleOrder(comments, postConfig.maxCommentDepth || 10)
-        .filter(comment => comment.author && comment.text && comment.author !== '[deleted]')
-        .filter(comment => !(postConfig.skipAutoModerator && comment.author === 'AutoModerator'));
+    const threadHtml = [];
+    for (const rootComment of comments) {
+        if (!rootComment.author || !rootComment.text || rootComment.author === '[deleted]') continue;
+        if (postConfig.skipAutoModerator && rootComment.author === 'AutoModerator') continue;
 
-    const renderedComments = [];
-    for (const comment of visibleComments) {
-        const sanitizedText = sanitizeHtmlForEpub(comment.text);
-        if (postConfig.effectiveMinLength > 0 && sanitizedText.length < postConfig.effectiveMinLength) continue;
+        const visibleComments = flattenCommentsVisibleOrder([rootComment], postConfig.maxCommentDepth || 10)
+            .filter(comment => comment.author && comment.text && comment.author !== '[deleted]')
+            .filter(comment => !(postConfig.skipAutoModerator && comment.author === 'AutoModerator'));
 
-        const depth = Math.min(comment.htmlDepth || 0, postConfig.maxCommentDepth || 10);
-        const guideStyle = getCommentDepthGuideStyle(depth, postConfig);
-        renderedComments.push(`<div class="html-comment" style="margin-top: 1em; ${guideStyle}">
-            <p style="margin: 0; font-size: 0.9em;"><strong>${escapeXml(comment.author)}</strong></p>
-            <div style="margin: 0;">${sanitizedText}</div>
-        </div>`);
+        const renderedComments = [];
+        let previousRenderedDepth = 0;
+        for (const comment of visibleComments) {
+            const sanitizedText = sanitizeHtmlForEpub(comment.text);
+            if (!sanitizedText.trim()) continue;
 
-        if (renderedComments.length >= postConfig.commentsPerPost) break;
+            const sourceDepth = Math.min(comment.htmlDepth || 0, postConfig.maxCommentDepth || 10);
+            const depth = renderedComments.length === 0
+                ? 0
+                : Math.min(sourceDepth, previousRenderedDepth + 1);
+            previousRenderedDepth = depth;
+            const guideStyle = getCommentDepthGuideStyle(depth, postConfig);
+            renderedComments.push(`<div class="html-comment" style="margin-top: 1em; ${guideStyle}">
+                <p style="margin: 0; font-size: 0.9em;"><strong>${escapeXml(comment.author)}</strong></p>
+                <div style="margin: 0;">${sanitizedText}</div>
+            </div>`);
+        }
+
+        if (renderedComments.length === 0) continue;
+        threadHtml.push(`<div class="comment-thread">${renderedComments.join('')}</div>`);
+        if (threadHtml.length >= postConfig.commentsPerPost) break;
     }
 
-    return renderedComments.join('');
+    return joinCommentThreads(threadHtml);
 }
 
 function generateThreadedCommentsHtml(comments, postConfig) {
     if (!comments || comments.length === 0) return '';
-    return comments.map(comment => {
+    const threadHtml = [];
+    for (const comment of comments) {
         if (postConfig.effectiveMinLength > 0) {
             let isThreadLongEnough = false;
             let threadWalker = comment;
@@ -1882,15 +1992,15 @@ function generateThreadedCommentsHtml(comments, postConfig) {
                 threadWalker = (threadWalker.replies && threadWalker.replies.length > 0) ? threadWalker.replies[0] : null;
                 depth++;
             }
-            if (!isThreadLongEnough) return '';
+            if (!isThreadLongEnough) continue;
         }
-        let threadHtml = '';
+        let currentThreadHtml = '';
         let currentComment = comment;
         let depth = 0;
         while (currentComment && depth < postConfig.maxCommentDepth) {
             if (currentComment.author && currentComment.text && currentComment.author !== '[deleted]') {
                 const sanitizedText = sanitizeHtmlForEpub(currentComment.text);
-                threadHtml += `
+                currentThreadHtml += `
                     <div class="thread-comment" style="margin-top: 0.8em;">
                         <p style="margin: 0; font-size: 0.9em;"><strong>${escapeXml(currentComment.author)}</strong></p>
                         <div style="margin: 0;">${sanitizedText}</div>
@@ -1899,14 +2009,20 @@ function generateThreadedCommentsHtml(comments, postConfig) {
             currentComment = (currentComment.replies && currentComment.replies.length > 0) ? currentComment.replies[0] : null;
             depth++;
         }
-        if (threadHtml) return `<div class="comment-thread">${threadHtml}</div>`;
-        return '';
-    }).filter(html => html.length > 0).join('');
+        if (currentThreadHtml) {
+            threadHtml.push(`<div class="comment-thread">${currentThreadHtml}</div>`);
+            if (threadHtml.length >= postConfig.commentsPerPost) break;
+        }
+    }
+    return joinCommentThreads(threadHtml);
 }
 
 function generateCommentsHtml(comments, postConfig) {
     const safeConfig = { ...config.reddit.defaults, ...postConfig };
     const tempPostConfig = { ...safeConfig };
+    if (normalizeSourceMode(tempPostConfig.sourceMode) === 'rss') {
+        return '';
+    }
     if (normalizeSourceMode(tempPostConfig.sourceMode) === 'html' && !postConfig.commentStyle) {
         tempPostConfig.commentStyle = 'html';
     } else if (normalizeSourceMode(tempPostConfig.sourceMode) === 'html' && tempPostConfig.commentStyle === 'threaded') {
@@ -1914,9 +2030,11 @@ function generateCommentsHtml(comments, postConfig) {
     }
     if (tempPostConfig.commentStyle === 'html') {
         tempPostConfig.disableMinLengthIfFewerComments = true;
+        tempPostConfig.effectiveMinLength = 0;
+    } else {
+        tempPostConfig.effectiveMinLength = tempPostConfig.minCommentLength || 0;
     }
-    tempPostConfig.effectiveMinLength = tempPostConfig.minCommentLength || 0;
-    if (tempPostConfig.disableMinLengthIfFewerComments && tempPostConfig.minCommentLength > 0 && comments && comments.length > 0) {
+    if (tempPostConfig.commentStyle !== 'html' && tempPostConfig.disableMinLengthIfFewerComments && tempPostConfig.minCommentLength > 0 && comments && comments.length > 0) {
         let validCommentCount = 0;
         if (tempPostConfig.commentStyle === 'threaded') {
             comments.forEach(comment => {
@@ -2088,8 +2206,8 @@ body { font-family: Georgia, serif; line-height: 1.45; margin: 1em; color: #111;
 h1, h2, h3, h4 { margin: 1.5em 0 0.5em 0; } h1 { font-size: 1.5em; font-weight: bold; overflow-wrap: anywhere; }
 h2 { font-size: 1.6em; text-align: center; } h3 { font-size: 1.1em; } h4 { font-weight: bold; color: #555; }
 img { display: block; margin: 1em auto; max-width: 100%; height: auto; } .img-container { text-align: center; margin: 1em 0; }
-.comments { margin-top: 2em; border-top: 1px solid #999; padding-top: 0.7em; } .comment-thread { border-bottom: 1px solid #ddd; padding-bottom: 0.8em; margin-bottom: 0.8em; }
-.comment-thread:last-child { border-bottom: none; margin-bottom: 0; } .subreddit { font-size: 0.9em; font-style: italic; }
+.comments { margin-top: 2em; border-top: 1px solid #999; padding-top: 0.7em; } .comment-thread { padding-bottom: 0.3em; margin-bottom: 0.3em; }
+.comment-separator { border: none; border-top: 1px solid #999; margin: 1em 0; height: 0; } .subreddit { font-size: 0.9em; font-style: italic; }
 .subreddit-title-page { text-align: center; padding: 10% 0; page-break-inside: avoid; }
 .subreddit-sorting { font-size: 0.9em; color: #666; font-weight: normal; margin-top: 0.5em; font-style: italic; }
 .subreddit-logo { width: 100px; height: 100px; border: 1px solid #000; margin: 0 auto 1em auto; }
@@ -2498,7 +2616,7 @@ async function processSinglePost(entry, currentPostNum, totalPostsInSub, sourceS
                 }, `Mercury parsing for ${truncate(externalUrl, 50)}`, 2);
 
                 log('debug', `Mercury parse completed for: ${truncate(externalUrl, 50)}`);
-                if (article && article.content) {
+                if (article && article.content && !containsRedditShellMarkup(article.content)) {
                     let leadImageHtml = '';
                     if (article.lead_image_url && !isUnsupportedImageFormat(article.lead_image_url)) {
                         if (config.reddit.downloadImages) {
@@ -2596,14 +2714,19 @@ async function processSinglePost(entry, currentPostNum, totalPostsInSub, sourceS
             }
         }
 
-        log('debug', `Starting comment fetch for: ${truncate(title, 60)}`);
-        currentProgressContext = {
-            subreddit: sourceSubredditName,
-            detail: `comments ${currentPostNum}/${totalPostsInSub}: ${truncate(title, 45)}`
-        };
-        await updateProgress(sourceSubredditName, 'comments', `💬 Comments ${currentPostNum}/${totalPostsInSub}: ${truncate(title, 45)}`);
-        const comments = await fetchComments(redditLink, resolvedConfig.commentsPerPost, resolvedConfig);
-        log('debug', `Comment fetch completed for: ${truncate(title, 60)}`);
+        let comments = [];
+        if (normalizeSourceMode(resolvedConfig.sourceMode) === 'rss') {
+            log('info', `RSS mode enabled; skipping comments for "${truncate(title, 60)}"`);
+        } else {
+            log('debug', `Starting comment fetch for: ${truncate(title, 60)}`);
+            currentProgressContext = {
+                subreddit: sourceSubredditName,
+                detail: `comments ${currentPostNum}/${totalPostsInSub}: ${truncate(title, 45)}`
+            };
+            await updateProgress(sourceSubredditName, 'comments', `💬 Comments ${currentPostNum}/${totalPostsInSub}: ${truncate(title, 45)}`);
+            comments = await fetchComments(redditLink, resolvedConfig.commentsPerPost, resolvedConfig);
+            log('debug', `Comment fetch completed for: ${truncate(title, 60)}`);
+        }
         log('success', `Finished processing "${truncate(title, 60)}"`);
         return { title, link: redditLink, description: postContent, comments, subreddit, sourceSubreddit: sourceSubredditName, postIndex: -1, config: { ...resolvedConfig } };
     } catch (error) {
@@ -2740,7 +2863,7 @@ async function processSubredditFeedInternal(resolvedConfig) {
                     isGalleryPost(postContent, finalExternalUrl, title, entry._rawRedditData))) {
                 skippedEntries.push(entry);
             } else if (!resolvedConfig.includeInternalLinks && isInternalRedditLink(finalExternalUrl) &&
-                !isUnsupportedVideo(postContent, finalExternalUrl)) {
+            !isUnsupportedVideo(postContent, finalExternalUrl, entry._rawRedditData)) {
                 skippedEntries.push(entry);
             }
             continue;
@@ -2768,7 +2891,7 @@ async function processSubredditFeedInternal(resolvedConfig) {
         }
 
         // Filter video posts
-        if (!resolvedConfig.includeVideoContent && isUnsupportedVideo(postContent, finalExternalUrl)) {
+        if (!resolvedConfig.includeVideoContent && isUnsupportedVideo(postContent, finalExternalUrl, entry._rawRedditData)) {
             log('skip', `Skipping video post: "${truncate(title, 60)}"`);
             subredditStats.videoPostsSkipped++;
             stats.videoPostsSkipped++;
@@ -2843,7 +2966,7 @@ async function processSubredditFeedInternal(resolvedConfig) {
                 log('debug', `Quota fill: Skipping AutoModerator post: "${truncate(title, 40)}"`);
                 continue;
             }
-            if (!resolvedConfig.includeVideoContent && isUnsupportedVideo(postContent, finalExternalUrl)) {
+            if (!resolvedConfig.includeVideoContent && isUnsupportedVideo(postContent, finalExternalUrl, entry._rawRedditData)) {
                 log('debug', `Quota fill: Skipping video post: "${truncate(title, 40)}"`);
                 continue;
             }

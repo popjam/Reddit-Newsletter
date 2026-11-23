@@ -25,6 +25,6 @@ fi
 osascript <<'APPLESCRIPT'
 tell application "Terminal"
   activate
-  do script "cd /Users/james/stuff-large/reddit-newsletter/Reddit-Newsletter && export REDDIT_CONFIG=user-config.daily.json && npm start"
+  do script "cd /Users/james/stuff-large/reddit-newsletter/Reddit-Newsletter && if [ -f .reddit-cookie ]; then export REDDIT_COOKIE=\"$(cat .reddit-cookie)\"; fi && export REDDIT_CONFIG=user-config.daily.json && npm start"
 end tell
 APPLESCRIPT

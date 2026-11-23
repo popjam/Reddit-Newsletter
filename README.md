@@ -177,9 +177,9 @@ crontab -e
 Configurations can be made in user-config.json. Subreddit configurations can be global or subreddit specific.
 
 ### Subreddit Settings
-- **sourceMode:** Content source to use: `html`, `rss`, `json`, or `auto`. The default is `html`, which scrapes old Reddit HTML for post lists and comments.
+- **sourceMode:** Content source to use: `html`, `rss`, `json`, or `auto`. The default is `html`, which scrapes old Reddit HTML for post lists and comments. `rss` mode is article/post-only and removes the comments section entirely.
 - **commentsPerPost:** Amount of top level comments for each post.
-- **OAuth note:** In `rss` and `json` modes, comments use Reddit's JSON API. In `html` mode, comments are scraped from old Reddit HTML instead.
+- **OAuth note:** In `json` mode, comments use Reddit's JSON API. In `html` mode, comments are scraped from old Reddit HTML instead. In `rss` mode, comments are skipped.
 - **HTML throttling:** `reddit.requestDelays.html.betweenRequests` controls old Reddit request spacing. `reddit.requestDelays.html.afterBlocked` is the first wait after a 403/429 block; retries increase from there with jitter.
 - **sort:** hot, new, top, controversial, best, rising
 - **timeframe:** hour, day, week, month, year, all
