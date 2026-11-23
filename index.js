@@ -676,6 +676,18 @@ const writeToFile = (level, message) => {
     }
 };
 
+// Progress for other programs (the JLauncher bridge): when NEWSLETTER_PROGRESS_FILE is set, the
+// current stage is written there as JSON. stage: subreddits (with index/total/subreddit), book, send, done.
+const progressFilePath = process.env.NEWSLETTER_PROGRESS_FILE;
+function reportProgress(fields) {
+    if (!progressFilePath) return;
+    try {
+        fs.writeFileSync(progressFilePath, JSON.stringify({ ...fields, at: Date.now() }));
+    } catch (e) {
+        log('warn', `Could not write progress file: ${e.message}`);
+    }
+}
+
 // Progress tracking
 let progressBar = null;
 let currentSubredditIndex = 0;
@@ -2411,6 +2423,7 @@ ${navPoints}
     const currentEpubPath = path.join(__dirname, currentEpubFilename);
     fs.writeFileSync(currentEpubPath, content);
     log('epub', `EPUB file created successfully as "${currentEpubFilename}"`);
+    return currentEpubFilename;
 }
 
 async function buildGalleryHtmlFromImageUrls(imageUrls, postId) {
@@ -3144,6 +3157,7 @@ async function main() {
 
         if (index > 0) await sleep(getRequestDelays().betweenSubreddits);
 
+        reportProgress({ stage: 'subreddits', index, total: subredditConfigs.length, subreddit: subConfig.name });
         try {
             const posts = await processSubredditFeed(resolvedConfig);
             posts.forEach(post => { if (!post.config) { log('error', `Post "${truncate(post.title, 50)}" missing config!`); post.config = resolvedConfig; } });
@@ -3158,6 +3172,7 @@ async function main() {
     allPosts.forEach((post, index) => { post.postIndex = index; });
 
     const subredditsWithPosts = [];
+    reportProgress({ stage: 'book', posts: allPosts.length });
 
     // Process subreddit info sequentially (NO CONCURRENCY)
     for (const subConfig of subredditConfigs) {
@@ -3185,7 +3200,9 @@ async function main() {
             });
         }
     }
-    await createEpub(subredditsWithPosts);
+    const epubFilename = await createEpub(subredditsWithPosts);
+    const sending = args.includes('--send');
+    reportProgress({ stage: sending ? 'send' : 'done', epub: epubFilename, posts: allPosts.length });
 
     // Complete progress bar and show final summary
     if (SIMPLE_LOGGING && progressBar) {
@@ -3347,8 +3364,9 @@ async function main() {
         log('summary', `No valid posts were found to generate an EPUB.`);
     }
 
-    if (args.includes('--send')) {
+    if (sending) {
         await sendLatestEpubToKindle();
+        reportProgress({ stage: 'done', epub: epubFilename, posts: totalPosts, sent: true });
     }
     console.log("\n");
 }

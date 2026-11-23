@@ -25,7 +25,9 @@
     "schedule-delete": "node schedule-manager.js delete",
     "schedule-delete-admin": "node schedule-delete-admin.js",
     "image-quality": "node image-quality.js",
-    "help": "node help.js"
+    "help": "node help.js",
+    "test": "node --test test/",
+    "bridge": "node jlauncher-bridge.js"
   },
   "dependencies": {
     "@postlight/parser": "^2.2.3",
