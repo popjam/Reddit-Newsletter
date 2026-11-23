@@ -5,10 +5,15 @@ REM --- Setup Logging Environment ---
 REM We set this variable so index.js knows where to write the verbose logs
 set "LOG_FILE=%~dp0newsletter-log.txt"
 
+REM --- Pick the newsletter profile ---
+REM Usage: run-newsletter.bat [daily|weekly]  (no argument uses user-config.json)
+if /i "%~1"=="daily" set "REDDIT_CONFIG=user-config.daily.json"
+if /i "%~1"=="weekly" set "REDDIT_CONFIG=user-config.json"
+
 REM --- Log Start to File Manually (for batch tracking) ---
 echo. >> "%LOG_FILE%"
 echo =============================================== >> "%LOG_FILE%"
-echo Batch Run Started: %date% %time% >> "%LOG_FILE%"
+echo Batch Run Started: %date% %time% (%REDDIT_CONFIG%) >> "%LOG_FILE%"
 
 REM --- Check for Node.js ---
 where node >nul 2>&1
