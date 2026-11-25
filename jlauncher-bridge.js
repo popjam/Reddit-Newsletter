@@ -8,7 +8,8 @@
  *   .../newsletter/requests/<id>   what the phone asks for, each done once and then removed:
  *                                  {type: "run", profile} | {type: "stop"} | {type: "settings", profile, settings}
  *   .../newsletter/status          the current or last run: state, profile, stage, percent, epub...
- *   .../newsletter/profiles/<p>    each profile's settings, without email or Reddit credentials
+ *   .../newsletter/profiles/<p>    each profile's settings, without email or Reddit credentials; "shared"
+ *                                  holds what both share (user-config.shared.json), and can't be run
  *   .../newsletter/issues          the issues on Google Drive, newest first
  *   .../newsletter/bridge          when this PC was last heard from
  * where ... is /lockdown/<key>.
@@ -28,6 +29,7 @@ import path from 'path';
 import { spawn, execFile } from 'child_process';
 import { fileURLToPath, pathToFileURL } from 'url';
 import { defaultConfig } from './config.js';
+import { SHARED_FILE, deepMerge, readJson, resolve, splitShared } from './config-loader.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const VERSION = 1;
@@ -45,7 +47,11 @@ export const ENUMS = {
     sort: ['hot', 'new', 'top', 'rising', 'controversial'],
     timeframe: ['hour', 'day', 'week', 'month', 'year', 'all'],
     commentStyle: ['threaded', 'nested', 'html'],
+    articleImages: ['all', 'top', 'none'],
 };
+
+/** The settings both newsletters share, in user-config.shared.json */
+export const SHARED = 'shared';
 
 /** The per-subreddit settings, with their types; a subreddit can override any of them */
 export const DEFAULT_KEYS = {
@@ -65,18 +71,22 @@ export const DEFAULT_KEYS = {
     timeframe: 'timeframe',
 };
 
-const REDDIT_KEYS = {
-    sourceMode: 'sourceMode',
-    downloadImages: 'bool',
-    randomizeSubredditOrder: 'bool',
-    imageOptimizationPreset: 'imageOptimizationPreset',
-};
-
-const EPUB_KEYS = {
-    title: 'string',
-    simplifiedTOC: 'bool',
-    hierarchicalTOC: 'bool',
-    generateDatedCover: 'bool',
+/** The reddit and epub settings outside the per-subreddit ones: a profile's own, and the shared ones */
+const KEYS = {
+    profile: {
+        reddit: { randomizeSubredditOrder: 'bool' },
+        epub: { title: 'string' },
+    },
+    shared: {
+        reddit: {
+            sourceMode: 'sourceMode',
+            downloadImages: 'bool',
+            imageOptimizationPreset: 'imageOptimizationPreset',
+            galleryFirstImageOnly: 'bool',
+            articleImages: 'articleImages',
+        },
+        epub: { simplifiedTOC: 'bool', hierarchicalTOC: 'bool', generateDatedCover: 'bool' },
+    },
 };
 
 function cleanValue(type, value) {
@@ -122,48 +132,72 @@ function asList(value) {
     return [];
 }
 
-/** Only the settings the phone may change, checked, from whatever it sent */
-export function cleanSettings(settings) {
+/**
+ * Only the settings the phone may change, checked, from whatever it sent: for a profile ([kind]
+ * "profile") its subreddits, posts, comments and title; for "shared", what both newsletters share
+ */
+export function cleanSettings(settings, kind = 'profile') {
     const reddit = settings?.reddit ?? {};
-    const out = {
-        reddit: {
-            ...cleanObject(REDDIT_KEYS, reddit),
-            defaults: cleanObject(DEFAULT_KEYS, reddit.defaults),
-        },
-        epub: cleanObject(EPUB_KEYS, settings?.epub),
-    };
-    if ('subreddits' in reddit) {
-        out.reddit.subreddits = asList(reddit.subreddits).map(cleanSubreddit).filter(Boolean);
+    const keys = KEYS[kind];
+    const out = { reddit: cleanObject(keys.reddit, reddit), epub: cleanObject(keys.epub, settings?.epub) };
+    if (kind === 'profile') {
+        out.reddit.defaults = cleanObject(DEFAULT_KEYS, reddit.defaults);
+        if ('subreddits' in reddit) out.reddit.subreddits = asList(reddit.subreddits).map(cleanSubreddit).filter(Boolean);
     }
     return out;
 }
 
-/** What a profile's file holds, merged onto the program's defaults, for the phone */
-export function publicSettings(userConfig) {
+/** What a profile's file (or the shared file, for [kind] "shared") holds, over the program's defaults, for the phone */
+export function publicSettings(userConfig, kind = 'profile') {
     const reddit = userConfig?.reddit ?? {};
     const epub = userConfig?.epub ?? {};
-    const pick = (keys, base, over) => cleanObject(keys, { ...base, ...over });
-    return {
-        reddit: {
-            ...pick(REDDIT_KEYS, defaultConfig.reddit, reddit),
-            defaults: pick(DEFAULT_KEYS, defaultConfig.reddit.defaults, reddit.defaults),
-            subreddits: asList(reddit.subreddits ?? defaultConfig.reddit.subreddits).map(cleanSubreddit).filter(Boolean),
-        },
-        epub: pick(EPUB_KEYS, defaultConfig.epub, epub),
+    const keys = KEYS[kind];
+    const pick = (k, base, over) => cleanObject(k, { ...base, ...over });
+    const out = {
+        reddit: pick(keys.reddit, defaultConfig.reddit, reddit),
+        epub: pick(keys.epub, defaultConfig.epub, epub),
     };
+    if (kind === 'profile') {
+        out.reddit.defaults = pick(DEFAULT_KEYS, defaultConfig.reddit.defaults, reddit.defaults);
+        out.reddit.subreddits = asList(reddit.subreddits ?? defaultConfig.reddit.subreddits).map(cleanSubreddit).filter(Boolean);
+    }
+    return out;
 }
 
-/** The profile's file with the phone's changes in it; email, credentials and anything else are kept */
-export function applySettings(userConfig, settings) {
-    const clean = cleanSettings(settings);
+/** The file with the phone's changes in it; email, credentials and anything else are kept */
+export function applySettings(userConfig, settings, kind = 'profile') {
+    const clean = cleanSettings(settings, kind);
     const next = JSON.parse(JSON.stringify(userConfig ?? {}));
     next.reddit = { ...(next.reddit ?? {}) };
     const { defaults, subreddits, ...rest } = clean.reddit;
     Object.assign(next.reddit, rest);
-    next.reddit.defaults = { ...(next.reddit.defaults ?? {}), ...defaults };
+    if (defaults) next.reddit.defaults = { ...(next.reddit.defaults ?? {}), ...defaults };
     if (subreddits && subreddits.length) next.reddit.subreddits = subreddits;
     next.epub = { ...(next.epub ?? {}), ...clean.epub };
     return next;
+}
+
+/**
+ * The shared file made from the profiles' files, when there isn't one yet: what they share moves into
+ * it, the later profile's (the weekly's) winning where they differ. A profile keeps a shared setting only
+ * where its value differs from what's shared, so nothing it sets its own way is lost.
+ * Returns { shared, profiles } (each profile's file as it should now be).
+ */
+export function moveToShared(profiles) {
+    const shared = {};
+    for (const config of Object.values(profiles)) deepMerge(shared, splitShared(config).shared);
+    const out = {};
+    for (const [name, config] of Object.entries(profiles)) {
+        const { shared: own, own: rest } = splitShared(config);
+        // Put back what differs from the shared value
+        for (const [section, values] of Object.entries(own)) {
+            for (const [key, value] of Object.entries(values)) {
+                if (JSON.stringify(value) !== JSON.stringify(shared[section]?.[key])) (rest[section] ??= {})[key] = value;
+            }
+        }
+        out[name] = rest;
+    }
+    return { shared, profiles: out };
 }
 
 // --- Progress ---
@@ -267,14 +301,38 @@ class Bridge {
     }
 
     profilePath(profile) {
-        const file = this.profiles[profile];
-        return file ? path.join(__dirname, file) : null;
+        const file = profile === SHARED ? SHARED_FILE : this.profiles[profile];
+        return file ? resolve(file) : null;
+    }
+
+    /** Moves what the profiles share into the shared file, once */
+    moveToShared() {
+        if (fs.existsSync(this.profilePath(SHARED))) return;
+        const files = {};
+        for (const profile of Object.keys(this.profiles)) {
+            const config = this.readProfile(profile);
+            if (config) files[profile] = config;
+        }
+        if (!Object.keys(files).length) return;
+        const { shared, profiles } = moveToShared(files);
+        for (const [profile, config] of Object.entries(profiles)) {
+            const file = this.profilePath(profile);
+            fs.copyFileSync(file, `${file}.bak`);
+            fs.writeFileSync(file, JSON.stringify(config, null, 2));
+        }
+        fs.writeFileSync(this.profilePath(SHARED), JSON.stringify(shared, null, 2));
+        this.log(`Moved the shared settings into ${SHARED_FILE}`);
+    }
+
+    /** Every secret a run of [profile] could use, to keep out of what's sent */
+    secrets(profile) {
+        const merged = deepMerge(deepMerge({}, this.readProfile(SHARED) ?? {}), this.readProfile(profile) ?? {});
+        return secretsOf(merged);
     }
 
     readProfile(profile) {
         const file = this.profilePath(profile);
-        if (!file || !fs.existsSync(file)) return null;
-        return JSON.parse(fs.readFileSync(file, 'utf8'));
+        return file ? readJson(file) : null;
     }
 
     async setStatus(fields) {
@@ -285,23 +343,27 @@ class Bridge {
     // Settings
 
     async publishProfiles(force = false) {
-        for (const profile of Object.keys(this.profiles)) {
+        for (const profile of [...Object.keys(this.profiles), SHARED]) {
             const file = this.profilePath(profile);
-            if (!file || !fs.existsSync(file)) continue;
-            const changed = fs.statSync(file).mtimeMs;
+            const exists = file && fs.existsSync(file);
+            // The shared settings go even before there's a file for them, as the defaults
+            if (!exists && profile !== SHARED) continue;
+            const changed = exists ? fs.statSync(file).mtimeMs : 0;
             if (!force && this.lastProfilesSent[profile] === changed) continue;
-            const settings = publicSettings(this.readProfile(profile));
+            const kind = profile === SHARED ? 'shared' : 'profile';
+            const settings = publicSettings(this.readProfile(profile), kind);
             await this.request('PUT', `profiles/${profile}`, { settings, updatedAt: Date.now() });
             this.lastProfilesSent[profile] = changed;
         }
     }
 
     async applySettingsRequest(req) {
-        const user = this.readProfile(req.profile);
+        const shared = req.profile === SHARED;
+        const user = this.readProfile(req.profile) ?? (shared ? {} : null);
         if (!user) return this.log(`Settings for unknown profile "${req.profile}" ignored`);
-        const next = applySettings(user, req.settings);
+        const next = applySettings(user, req.settings, shared ? 'shared' : 'profile');
         const file = this.profilePath(req.profile);
-        fs.copyFileSync(file, `${file}.bak`);
+        if (fs.existsSync(file)) fs.copyFileSync(file, `${file}.bak`);
         fs.writeFileSync(file, JSON.stringify(next, null, 2));
         this.log(`Settings for ${req.profile} changed from the phone`);
         await this.publishProfiles(true);
@@ -311,7 +373,7 @@ class Bridge {
 
     async startRun(id, req) {
         if (this.child) return this.log(`Run request for ${req.profile} ignored: a run is going`);
-        const file = this.profilePath(req.profile);
+        const file = req.profile === SHARED ? null : this.profilePath(req.profile);
         if (!file || !fs.existsSync(file)) {
             return this.setStatus({ state: 'failed', profile: req.profile, message: `No settings file for ${req.profile}`, finishedAt: Date.now(), requestId: id });
         }
@@ -376,7 +438,7 @@ class Bridge {
         await this.checkProgress().catch(() => {});
         const run = this.run;
         const progress = this.readProgress();
-        const secrets = secretsOf(this.readProfile(run.profile));
+        const secrets = this.secrets(run.profile);
         this.child = null;
         this.run = null;
 
@@ -463,6 +525,7 @@ class Bridge {
 
     async start(once) {
         this.log(`Bridge started${once ? ' (once)' : ''}`);
+        try { this.moveToShared(); } catch (e) { this.log(`Moving the shared settings failed: ${e.message}`); }
         try {
             this.status = (await this.request('GET', 'status')) ?? {};
             // A run that was going when this PC stopped can't be followed any more

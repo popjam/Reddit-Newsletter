@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { cleanSettings, cleanSubreddit, publicSettings, applySettings, percentOf, issueName, sortIssues, scrub } from '../jlauncher-bridge.js';
+import { cleanSettings, cleanSubreddit, publicSettings, applySettings, moveToShared, percentOf, issueName, sortIssues, scrub } from '../jlauncher-bridge.js';
+import { loadUserConfig, splitShared } from '../config-loader.js';
 
 const userConfig = {
     email: { provider: 'gmx', gmx: { email: 'me@example.com', password: 'secret-pass' }, kindle: { email: 'me@kindle.com' } },
@@ -24,8 +25,76 @@ test('public settings leave out email and Reddit credentials', () => {
     assert.equal(s.reddit.defaults.timeframe, 'week');
     // Filled in from the program's defaults
     assert.equal(s.reddit.defaults.skipAutoModerator, true);
-    assert.equal(s.reddit.imageOptimizationPreset, 'default');
     assert.equal(s.epub.title, 'Reddit Daily Newsletter');
+    // What both share isn't a profile's
+    assert.equal(s.reddit.imageOptimizationPreset, undefined);
+    assert.equal(s.reddit.sourceMode, undefined);
+    assert.equal(s.epub.hierarchicalTOC, undefined);
+});
+
+test('shared settings are only the shared ones, without credentials', () => {
+    const s = publicSettings(userConfig, 'shared');
+    const text = JSON.stringify(s);
+    for (const secret of ['secret-pass', 'oauth-secret', 'reddit-pass', 'me@example.com', 'me@kindle.com']) {
+        assert.ok(!text.includes(secret), secret);
+    }
+    assert.equal(s.reddit.sourceMode, 'html');
+    assert.equal(s.reddit.imageOptimizationPreset, 'default');
+    assert.equal(s.reddit.galleryFirstImageOnly, false);
+    assert.equal(s.reddit.articleImages, 'all');
+    assert.equal(s.reddit.subreddits, undefined);
+    assert.equal(s.reddit.defaults, undefined);
+    assert.equal(s.epub.title, undefined);
+    assert.equal(s.epub.hierarchicalTOC, true);
+});
+
+test('shared changes are checked and kept to the shared settings', () => {
+    const next = applySettings({ email: { gmx: { password: 'secret-pass' } } }, {
+        reddit: { galleryFirstImageOnly: true, articleImages: 'top', subreddits: ['news'], defaults: { commentsPerPost: 3 } },
+        epub: { title: 'x', generateDatedCover: false },
+    }, 'shared');
+    assert.equal(next.email.gmx.password, 'secret-pass');
+    assert.equal(next.reddit.galleryFirstImageOnly, true);
+    assert.equal(next.reddit.articleImages, 'top');
+    assert.equal(next.reddit.subreddits, undefined);
+    assert.equal(next.reddit.defaults, undefined);
+    assert.equal(next.epub.title, undefined);
+    assert.equal(next.epub.generateDatedCover, false);
+    assert.equal(applySettings({}, { reddit: { articleImages: 'some' } }, 'shared').reddit.articleImages, undefined);
+});
+
+test('the profiles move what they share into the shared file', () => {
+    const daily = { ...structuredClone(userConfig), reddit: { ...structuredClone(userConfig.reddit), defaults: { timeframe: 'day' } } };
+    const weekly = structuredClone(userConfig);
+    weekly.epub.hierarchicalTOC = false;
+    const { shared, profiles } = moveToShared({ daily, weekly });
+    assert.equal(shared.email.gmx.password, 'secret-pass');
+    assert.equal(shared.reddit.oauth2.clientSecret, 'oauth-secret');
+    assert.equal(shared.reddit.sourceMode, 'html');
+    // The weekly wins where they differ, and the daily keeps its own value
+    assert.equal(shared.epub.hierarchicalTOC, false);
+    assert.equal(profiles.daily.epub.hierarchicalTOC, true);
+    assert.equal(profiles.weekly.epub.hierarchicalTOC, undefined);
+    for (const p of Object.values(profiles)) {
+        assert.equal(p.email, undefined);
+        assert.equal(p.reddit.oauth2, undefined);
+        assert.equal(p.reddit.sourceMode, undefined);
+        assert.ok(p.reddit.subreddits.length);
+        assert.equal(p.epub.title, 'Reddit Daily Newsletter');
+    }
+    assert.equal(profiles.daily.reddit.defaults.timeframe, 'day');
+});
+
+test('splitting leaves the original alone', () => {
+    const { shared, own } = splitShared(userConfig);
+    assert.equal(shared.reddit.sourceMode, 'html');
+    assert.equal(own.reddit.sourceMode, undefined);
+    assert.equal(userConfig.reddit.sourceMode, 'html');
+});
+
+test('a run reads defaults, then the shared file, then the profile', () => {
+    const { config } = loadUserConfig({ profileFile: 'test/does-not-exist.json' });
+    assert.equal(config.reddit.articleImages !== undefined, true);
 });
 
 test('subreddit names and overrides are checked', () => {
@@ -43,17 +112,19 @@ test('cleaning drops unknown keys and bad values', () => {
         epub: { title: '  Weekly  ', creator: 'x' },
     });
     assert.deepEqual(s, { reddit: { defaults: { sort: 'top' }, subreddits: ['news', 'aus'] }, epub: { title: 'Weekly' } });
+    // A profile can't set what's shared
+    assert.equal(cleanSettings({ reddit: { downloadImages: false } }).reddit.downloadImages, undefined);
 });
 
 test('applying keeps email and credentials and replaces what the phone changed', () => {
     const next = applySettings(userConfig, {
-        reddit: { downloadImages: false, defaults: { commentsPerPost: 3 }, subreddits: ['aus', { name: 'all', sort: 'controversial' }] },
+        reddit: { randomizeSubredditOrder: true, defaults: { commentsPerPost: 3 }, subreddits: ['aus', { name: 'all', sort: 'controversial' }] },
         epub: { title: 'Weekly' },
         email: { gmx: { password: 'hacked' } },
     });
     assert.equal(next.email.gmx.password, 'secret-pass');
     assert.equal(next.reddit.oauth2.clientSecret, 'oauth-secret');
-    assert.equal(next.reddit.downloadImages, false);
+    assert.equal(next.reddit.randomizeSubredditOrder, true);
     assert.equal(next.reddit.defaults.commentsPerPost, 3);
     assert.equal(next.reddit.defaults.timeframe, 'week');
     assert.deepEqual(next.reddit.subreddits, ['aus', { name: 'all', sort: 'controversial' }]);

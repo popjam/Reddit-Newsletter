@@ -2,7 +2,8 @@ import axios from 'axios';
 import fs from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
-import { defaultConfig } from './config.js'; // Import the base default config
+import { defaultConfig } from './config.js';
+import { loadUserConfig } from './config-loader.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -14,34 +15,9 @@ const authLog = (message) => {
     }
 };
 
-// --- UNIFIED CONFIGURATION LOADER (Copied from index.js) ---
+// --- CONFIGURATION: defaults, then user-config.shared.json, then the profile (config-loader.js) ---
 function loadConfig() {
-    let finalConfig = JSON.parse(JSON.stringify(defaultConfig)); // Deep copy defaults
-    const userConfigPath = path.join(__dirname, 'user-config.json');
-
-    if (fs.existsSync(userConfigPath)) {
-        try {
-            const userConfig = JSON.parse(fs.readFileSync(userConfigPath, 'utf8'));
-            // Deep merge user config onto the defaults
-            const deepMerge = (target, source) => {
-                for (const key in source) {
-                    if (source[key] && typeof source[key] === 'object' && !Array.isArray(source[key])) {
-                        if (!target[key]) Object.assign(target, { [key]: {} });
-                        deepMerge(target[key], source[key]);
-                    } else if (source[key] !== undefined) {
-                        Object.assign(target, { [key]: source[key] });
-                    }
-                }
-                return target;
-            };
-            finalConfig = deepMerge(finalConfig, userConfig);
-        } catch (e) {
-            authLog(`⚠️  [AUTH] Could not parse user-config.json, using default settings. Error: ${e.message}`);
-        }
-    } else {
-        authLog('⚠️  [AUTH] user-config.json not found. Authentication might fail.');
-    }
-    return finalConfig;
+    return loadUserConfig({ say: line => authLog(`[AUTH] ${line}`) }).config;
 }
 
 // Load the final, merged configuration

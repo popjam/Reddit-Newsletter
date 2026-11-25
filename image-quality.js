@@ -12,7 +12,7 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
  */
 
 function showCurrentSettings() {
-    const userConfigPath = path.join(__dirname, 'user-config.json');
+    const userConfigPath = path.join(__dirname, 'user-config.shared.json');
     
     if (fs.existsSync(userConfigPath)) {
         try {
@@ -21,24 +21,24 @@ function showCurrentSettings() {
             console.log(`📸 Current image quality preset: ${currentPreset}`);
             return currentPreset;
         } catch (e) {
-            console.log('⚠️  Error reading user-config.json');
+            console.log('⚠️  Error reading user-config.shared.json');
             return 'default';
         }
     } else {
-        console.log('📸 Current image quality preset: default (no user-config.json found)');
+        console.log('📸 Current image quality preset: default (no user-config.shared.json found)');
         return 'default';
     }
 }
 
 function setImageQuality(preset) {
-    const userConfigPath = path.join(__dirname, 'user-config.json');
+    const userConfigPath = path.join(__dirname, 'user-config.shared.json');
     
     let userConfig = {};
     if (fs.existsSync(userConfigPath)) {
         try {
             userConfig = JSON.parse(fs.readFileSync(userConfigPath, 'utf8'));
         } catch (e) {
-            console.log('⚠️  Error reading existing user-config.json, creating new one');
+            console.log('⚠️  Error reading existing user-config.shared.json, creating new one');
         }
     }
     

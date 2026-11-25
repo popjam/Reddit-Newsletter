@@ -62,6 +62,10 @@ export const defaultConfig = {
 
         // Image handling settings
         downloadImages: true,
+        // Only the first picture of a gallery post
+        galleryFirstImageOnly: false,
+        // An article's pictures: 'all', 'top' (just the one at its head) or 'none'
+        articleImages: 'all',
 
         // Content source: 'html' (old Reddit HTML), 'rss', 'json', or 'auto'
         // 'html' avoids Reddit RSS/JSON for post lists and comments where possible.
@@ -104,7 +108,7 @@ export const defaultConfig = {
         enableImageOptimization: true,
         
         // Image optimization preset: 'default', 'aggressive', 'extreme'
-        // User can override in user-config.json
+        // Set in user-config.shared.json
         imageOptimizationPreset: 'default',
         
         maxImageWidth: 1200,

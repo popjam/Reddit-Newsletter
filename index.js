@@ -10,6 +10,7 @@ import { decode } from 'html-entities';
 import sharp from 'sharp';
 import pLimit from 'p-limit';
 import { defaultConfig } from './config.js'; // Import the base default config
+import { loadUserConfig } from './config-loader.js';
 import { makeAuthenticatedRedditRequest, redditAuth } from './reddit-auth.js';
 import { generateDatedCover } from './cover-generator.js';
 import cliProgress from 'cli-progress';
@@ -18,41 +19,11 @@ import { JSDOM } from 'jsdom';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
-// --- UNIFIED CONFIGURATION LOADER ---
-function getUserConfigPath() {
-    const configFile = process.env.REDDIT_CONFIG || 'user-config.json';
-    return path.isAbsolute(configFile) ? configFile : path.join(__dirname, configFile);
-}
-
+// --- CONFIGURATION ---
+// Defaults, then user-config.shared.json, then the profile's file (see config-loader.js)
 function loadConfig() {
-    let finalConfig = JSON.parse(JSON.stringify(defaultConfig)); // Deep copy defaults
-    const userConfigPath = getUserConfigPath();
-    const userConfigName = path.basename(userConfigPath);
-
-    if (fs.existsSync(userConfigPath)) {
-        try {
-            const userConfig = JSON.parse(fs.readFileSync(userConfigPath, 'utf8'));
-            // Deep merge user config onto the defaults
-            const deepMerge = (target, source) => {
-                for (const key in source) {
-                    if (source[key] && typeof source[key] === 'object' && !Array.isArray(source[key])) {
-                        if (!target[key]) Object.assign(target, { [key]: {} });
-                        deepMerge(target[key], source[key]);
-                    } else if (source[key] !== undefined) {
-                        Object.assign(target, { [key]: source[key] });
-                    }
-                }
-                return target;
-            };
-            finalConfig = deepMerge(finalConfig, userConfig);
-            console.log(`ℹ️  Loaded and merged settings from ${userConfigName}`);
-        } catch (e) {
-            console.log(`⚠️  Could not parse ${userConfigName}, using default settings. Error: ${e.message}`);
-        }
-    } else {
-        console.log(`ℹ️  ${userConfigName} not found. Using default settings from config.js.`);
-        console.log('⚠️  Please run "npm run setup" to configure your credentials and subreddits.');
-    }
+    const { config: finalConfig, found } = loadUserConfig({ say: line => console.log(line) });
+    if (!found.profile) console.log('⚠️  Please run "npm run setup" to configure your credentials and subreddits.');
 
     // Apply image optimization preset overrides
     applyImageOptimizationPreset(finalConfig);
@@ -568,7 +539,7 @@ function sanitizeHtmlForEpub(html) {
 /**
  * Ensures all content is properly cleaned and EPUB-safe before use
  */
-async function cleanContentForEpub(content, postId) {
+async function cleanContentForEpub(content, postId, { images = true } = {}) {
     log('debug', `Starting cleanContentForEpub for post ${postId}`);
 
     if (!content || typeof content !== 'string') {
@@ -584,8 +555,10 @@ async function cleanContentForEpub(content, postId) {
     cleaned = cleaned.replace(/<\/?(?:shreddit|faceplate|rpl|pdp)-[a-z0-9-]+[^>]*>/gi, '');
     log('debug', `Completed sanitizeHtmlForEpub for post ${postId}`);
 
-    // Second pass: process any remaining images if downloads are enabled
-    if (config.reddit.downloadImages) {
+    // Second pass: process any remaining images if downloads are enabled (left out of articles when set)
+    if (!images) {
+        cleaned = cleaned.replace(/<img[^>]*>/gi, '').replace(/<figure[^>]*>\s*(?:<figcaption[\s\S]*?<\/figcaption>)?\s*<\/figure>/gi, '');
+    } else if (config.reddit.downloadImages) {
         log('debug', `Starting image processing for post ${postId}`);
         cleaned = await processImagesInContent(cleaned, postId);
         log('debug', `Completed image processing for post ${postId}`);
@@ -2126,7 +2099,7 @@ async function createEpub(subredditsWithPosts) {
     const bookId = `reddit-${Date.now()}`;
     const currentDate = format(new Date(), 'MMMM do, yyyy');
     const zip = new JSZip();
-    zip.file('mimetype', 'application/epub+zip');
+    zip.file('mimetype', 'application/epub+zip', { compression: 'STORE' });
     zip.folder('META-INF').file('container.xml', `<?xml version="1.0"?>
 <container version="1.0" xmlns="urn:oasis:names:tc:opendocument:xmlns:container">
   <rootfiles>
@@ -2405,7 +2378,11 @@ ${navPoints}
         }
         oebps.file(page.href, pageContent);
     }
-    const content = await zip.generateAsync({ type: 'nodebuffer' });
+    // Text compresses to about a fifth; pictures are already compressed, so they're stored as they are
+    zip.forEach((relativePath, file) => {
+        if (/\.(jpe?g|png|gif|webp)$/i.test(relativePath)) file.options.compression = 'STORE';
+    });
+    const content = await zip.generateAsync({ type: 'nodebuffer', compression: 'DEFLATE', compressionOptions: { level: 9 } });
 
     let currentEpubFilename;
     if (typeof epubConfig.generateFilename === 'function') {
@@ -2426,8 +2403,16 @@ ${navPoints}
     return currentEpubFilename;
 }
 
+/** Which of an article's pictures go in: 'all', 'top' (the one at its head) or 'none' */
+function articleImages() {
+    const value = config.reddit.articleImages;
+    return value === 'top' || value === 'none' ? value : 'all';
+}
+
 async function buildGalleryHtmlFromImageUrls(imageUrls, postId) {
     const galleryImagesHtml = [];
+    // Only the first picture of a gallery, when set
+    if (config.reddit.galleryFirstImageOnly && imageUrls.length > 1) imageUrls = imageUrls.slice(0, 1);
 
     for (let index = 0; index < imageUrls.length; index++) {
         const imageUrl = imageUrls[index];
@@ -2480,9 +2465,19 @@ async function sendLatestEpubToKindle() {
     await new Promise((resolve, reject) => {
         const child = spawn(process.execPath, [senderPath], {
             cwd: __dirname,
-            stdio: 'inherit',
+            stdio: ['ignore', 'pipe', 'pipe'],
             env: process.env
         });
+        // Echoed, and kept in the log: errors as errors, so the phone shows the last one
+        const relay = level => chunk => {
+            for (const line of chunk.toString().split(/\r?\n/)) {
+                if (!line.trim()) continue;
+                const isError = level === 'error' || /❌|Failed|Error:/.test(line);
+                log(isError ? 'error' : 'info', `Kindle: ${line.trim()}`);
+            }
+        };
+        child.stdout.on('data', relay('info'));
+        child.stderr.on('data', relay('error'));
 
         child.on('error', reject);
         child.on('close', code => {
@@ -2631,7 +2626,7 @@ async function processSinglePost(entry, currentPostNum, totalPostsInSub, sourceS
                 log('debug', `Mercury parse completed for: ${truncate(externalUrl, 50)}`);
                 if (article && article.content && !containsRedditShellMarkup(article.content)) {
                     let leadImageHtml = '';
-                    if (article.lead_image_url && !isUnsupportedImageFormat(article.lead_image_url)) {
+                    if (articleImages() !== 'none' && article.lead_image_url && !isUnsupportedImageFormat(article.lead_image_url)) {
                         if (config.reddit.downloadImages) {
                             const imageName = `post_${postId}_lead`;
                             const fileName = await downloadImage(article.lead_image_url, imageName);
@@ -2644,7 +2639,7 @@ async function processSinglePost(entry, currentPostNum, totalPostsInSub, sourceS
                     }
 
                     // Clean the article content using our new function
-                    let cleanedArticleContent = await cleanContentForEpub(article.content, postId);
+                    let cleanedArticleContent = await cleanContentForEpub(article.content, postId, { images: articleImages() === 'all' });
 
                     const sourceInfo = `${escapeXml(article.domain)}${article.author ? ` | By ${escapeXml(article.author)}` : ''}`;
                     // Use full cleaned article content with preserved paragraph formatting
@@ -3046,7 +3041,7 @@ async function main() {
     }
 
     log('info', "Starting process...");
-    log('config', `Using global config: ${JSON.stringify({ ...config, reddit: { ...config.reddit, subreddits: undefined, defaults: undefined, oauth2: undefined } })}`);
+    log('config', `Using global config: ${JSON.stringify({ ...config, email: undefined, reddit: { ...config.reddit, subreddits: undefined, defaults: undefined, oauth2: undefined, htmlAuth: undefined } })}`);
     log('config', `Using default subreddit settings: ${JSON.stringify(config.reddit.defaults)}`);
     log('config', `Image download mode: ${config.reddit.downloadImages ? 'ON' : 'OFF'}`);
 

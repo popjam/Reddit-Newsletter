@@ -10,46 +10,18 @@ import fs from 'fs/promises';
 import fsSync from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
-import { defaultConfig } from './config.js';
+import { loadUserConfig } from './config-loader.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
-// --- UNIFIED CONFIGURATION LOADER ---
-function getUserConfigPath() {
-    const configFile = process.env.REDDIT_CONFIG || 'user-config.json';
-    return path.isAbsolute(configFile) ? configFile : path.join(__dirname, configFile);
-}
-
+// --- CONFIGURATION: defaults, then user-config.shared.json, then the profile (config-loader.js) ---
 function loadConfig() {
-    let finalConfig = JSON.parse(JSON.stringify(defaultConfig)); // Deep copy defaults
-    const userConfigPath = getUserConfigPath();
-    const userConfigName = path.basename(userConfigPath);
-
-    if (fsSync.existsSync(userConfigPath)) {
-        try {
-            const userConfig = JSON.parse(fsSync.readFileSync(userConfigPath, 'utf8'));
-            // Deep merge user config onto the defaults
-            const deepMerge = (target, source) => {
-                for (const key in source) {
-                    if (source[key] && typeof source[key] === 'object' && !Array.isArray(source[key])) {
-                        if (!target[key]) Object.assign(target, { [key]: {} });
-                        deepMerge(target[key], source[key]);
-                    } else if (source[key] !== undefined) {
-                        Object.assign(target, { [key]: source[key] });
-                    }
-                }
-                return target;
-            };
-            finalConfig = deepMerge(finalConfig, userConfig);
-            console.log(`ℹ️  Loaded and merged email settings from ${userConfigName}`);
-        } catch (e) {
-            console.log(`⚠️  Could not parse ${userConfigName}, using default email settings. Error: ${e.message}`);
-        }
-    } else {
-        console.log(`⚠️  ${userConfigName} not found. Cannot send email. Please run "npm run setup".`);
-        return null; // Return null if config is missing
+    const { config, found } = loadUserConfig({ say: line => console.log(line) });
+    if (!found.shared && !found.profile) {
+        console.log('⚠️  No settings found. Cannot send email. Please run "npm run setup".');
+        return null;
     }
-    return finalConfig;
+    return config;
 }
 
 const config = loadConfig();

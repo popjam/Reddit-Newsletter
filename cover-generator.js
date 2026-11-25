@@ -86,24 +86,9 @@ export async function generateDatedCover(config, verbose = false) {
  */
 async function generateCoverStandalone() {
     try {
-        // Load config
-        const configPath = path.join(__dirname, 'user-config.json');
-        const defaultConfigPath = path.join(__dirname, 'config.js');
-
-        let config;
-        if (fs.existsSync(configPath)) {
-            const userConfig = JSON.parse(fs.readFileSync(configPath, 'utf8'));
-            const { defaultConfig } = await import('./config.js');
-
-            // Merge configs
-            config = { ...defaultConfig };
-            if (userConfig.epub) {
-                config.epub = { ...defaultConfig.epub, ...userConfig.epub };
-            }
-        } else {
-            const { defaultConfig } = await import('./config.js');
-            config = defaultConfig;
-        }
+        // Defaults, then user-config.shared.json, then the profile (config-loader.js)
+        const { loadUserConfig } = await import('./config-loader.js');
+        const { config } = loadUserConfig();
 
         const success = await generateDatedCover(config, true);
         process.exit(success ? 0 : 1);
